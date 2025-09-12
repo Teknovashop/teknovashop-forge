@@ -1,8 +1,9 @@
+numpy==1.26.4
+nptyping==2.5.0
 fastapi==0.114.0
 uvicorn[standard]==0.30.0
 cadquery==2.4.0
 supabase==2.6.0
-numpy
-pydantic
-trimesh
-python-multipart
+pydantic==2.11.7
+python-multipart==0.0.20
+trimesh==4.8.1
