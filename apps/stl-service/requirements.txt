@@ -1,10 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
+httpx==0.25.2
+supabase==2.4.0
 
-# Combo estable con gotrue que evita el error 'proxy'
-httpx==0.27.2
-supabase==2.6.0
-
-# (opcional, si tu generación STL las usa)
-# numpy==2.0.1
-# trimesh==4.4.9
+# NUEVO:
+trimesh==4.4.9
+shapely==2.0.4
+numpy==1.26.4
