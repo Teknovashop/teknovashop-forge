@@ -1,67 +1,78 @@
 import os
-import io
 import uuid
 from typing import Optional
 
-from supabase import Client, create_client
-# NOTA: con supabase==2.4.0 + httpx==0.25.x no usar FileOptions.upsert (no existe en sync mixin)
+from supabase import create_client, Client
+
 
 class Storage:
     """
-    Pequeña envoltura para subir bytes a Supabase Storage y devolver URL firmada.
-    Compatible con supabase==2.4.0 (SDK v2) y httpx==0.25.x.
+    Pequeño wrapper de Supabase Storage para subir STL y firmar URL.
+    - Acepta ANON o SERVICE ROLE como auth.
+    - Acepta tanto SUPABASE_SERVICE_ROLE_KEY como SUPABASE_SERVICE_KEY.
+    - Genera nombre único para evitar 'Duplicate'.
+    - Desactiva proxies para evitar el error 'proxy' en httpx.
     """
 
     def __init__(self) -> None:
-        # --------- IMPORTANTE: neutralizar proxies heredados de la plataforma ----------
-        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        # Apaga proxies que rompen httpx/gotrue en algunos entornos
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             os.environ.pop(k, None)
-        # --------------------------------------------------------------------------------
 
-        url = os.environ.get("SUPABASE_URL", "").strip()
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY", "")
-        key = (key or "").strip()
-        if not url or not key:
-            raise RuntimeError("Faltan SUPABASE_URL y/o SUPABASE_*_KEY en el entorno")
+        url = (os.environ.get("SUPABASE_URL") or "").strip()
+        if not url:
+            raise RuntimeError("Falta SUPABASE_URL en el entorno")
 
-        # Crear cliente síncrono
+        # Acepta varios nombres de clave
+        key = (
+            os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+            or os.environ.get("SUPABASE_SERVICE_KEY")
+            or os.environ.get("SUPABASE_ANON_KEY")
+            or ""
+        ).strip()
+        if not key:
+            raise RuntimeError(
+                "Falta una clave de Supabase: define SUPABASE_SERVICE_ROLE_KEY "
+                "(o SUPABASE_SERVICE_KEY / SUPABASE_ANON_KEY) en el entorno"
+            )
+
+        self.bucket = (os.environ.get("SUPABASE_BUCKET") or "forge-stl").strip()
+
+        # Cliente sync (el que ya estás usando)
         self._client: Client = create_client(url, key)
-
-        # Bucket a usar (por defecto el que ya estás usando)
-        self._bucket = os.environ.get("SUPABASE_BUCKET", "forge-stl")
 
     def upload_stl_and_sign(
         self,
         data: bytes,
-        filename: Optional[str] = None,
+        filename: str = "forge-output.stl",
+        folder: str = "forge-stl",
         expires_in: int = 3600,
-        prefix: str = "forge-stl",
     ) -> str:
         """
-        Sube `data` al bucket y devuelve una URL firmada temporal.
-        Para evitar colisiones, generamos un path único.
+        Sube bytes a storage y devuelve URL firmada.
+        Para evitar 'Duplicate', añadimos un sufijo único al nombre.
         """
-        if not filename:
-            filename = "output.stl"
+        # Asegura extensión y path único
+        base, ext = (filename.rsplit(".", 1) + ["stl"])[0:2]
+        unique = uuid.uuid4().hex[:12]
+        path = f"{folder}/{base}-{unique}.{ext}"
 
-        unique = uuid.uuid4().hex  # evita "Duplicate"
-        path = f"{prefix}/{unique}-{filename}"
+        # Subida (sin 'upsert' para compatibilidad de SDK)
+        file_options = {"contentType": "model/stl"}
+        res = self._client.storage.from_(self.bucket).upload(path, data, file_options)  # type: ignore
 
-        # Subida (no hay 'upsert' en el mixin síncrono de esta versión)
-        # content_type opcional: "model/stl" o "application/sla"
-        self._client.storage.from_(self._bucket).upload(
-            path,
-            io.BytesIO(data),
-            file_options={"content-type": "model/stl"},
-        )
+        if isinstance(res, dict) and res.get("error"):
+            # SDK v2 devuelve {'statusCode': 400, 'error': 'Duplicate', ...} en algunos casos
+            raise RuntimeError(str(res))
 
         # URL firmada
-        signed = self._client.storage.from_(self._bucket).create_signed_url(path, expires_in)
-        # La SDK devuelve dict con 'signedURL' o 'signed_url' según versión;
-        # contemplamos ambas claves.
-        url = signed.get("signedURL") or signed.get("signed_url")
-        if not url:
-            # fallback: si la lib cambiase, intentamos construir URL pública si el bucket lo fuera
-            raise RuntimeError(f"No se pudo obtener signed URL: {signed!r}")
+        signed = self._client.storage.from_(self.bucket).create_signed_url(path, expires_in)  # type: ignore
+        if isinstance(signed, dict) and signed.get("error"):
+            raise RuntimeError(str(signed))
 
-        return url
+        # El SDK suele devolver dict con 'signedURL' o 'signed_url'
+        url = signed.get("signedURL") or signed.get("signed_url") or signed.get("publicURL") or signed  # type: ignore
+        if isinstance(url, str):
+            return url
+        # Fallback por si el SDK cambia estructura
+        raise RuntimeError(f"No se pudo obtener signed URL: {signed}")
