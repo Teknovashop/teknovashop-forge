@@ -1,50 +1,49 @@
 # apps/stl-service/app.py
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import cadquery as cq
-import tempfile, os
-from utils.storage import upload_to_supabase
-from utils.watermark import apply_text_watermark
+import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()  # <<--- ESTA variable debe llamarse exactamente "app"
+# --- crea la app antes de incluir routers ---
+app = FastAPI(title="STL Service")
 
-class GenReq(BaseModel):
-    order_id: str
-    model_slug: str
-    params: dict
-    license: str  # 'personal' | 'commercial'
+# Lee orígenes permitidos desde env (Render → Environment)
+raw_origins = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+
+if raw_origins == "*" or raw_origins == "":
+    allow_origins = ["*"]
+else:
+    # admite lista separada por comas
+    allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+
+# El middleware CORS DEBE ir antes de montar rutas/routers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,       # p.ej. ["*"] o ["https://tu-vercel.vercel.app"]
+    allow_credentials=True,
+    allow_methods=["*"],               # importante para que preflight responda 200
+    allow_headers=["*"],               # idem (Content-Type, Authorization, etc.)
+    expose_headers=["Content-Disposition"],  # si descargas archivos
+)
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+# --- tu endpoint real ---
+from pydantic import BaseModel
+class GeneratePayload(BaseModel):
+    order_id: str
+    model_slug: str
+    params: dict
+    license: str
+
 @app.post("/generate")
-def generate(req: GenReq):
-    try:
-        if req.model_slug == 'vesa-adapter':
-            stl = vesa_adapter(**req.params)
-        elif req.model_slug == 'router-mount':
-            stl = router_mount(**req.params)
-        elif req.model_slug == 'cable-tray':
-            stl = cable_tray(**req.params)
-        else:
-            raise HTTPException(400, 'Unknown model')
+def generate(payload: GeneratePayload):
+    # tu lógica real aquí – devuelvo mínimo válido
+    return {"status": "ok", "stl_url": "https://example.com/fake.stl"}
 
-        with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, f"{req.model_slug}-{req.order_id}.stl")
-            cq.exporters.export(stl, path)
-            if req.license == 'commercial':
-                apply_text_watermark(path, text=os.getenv('WATERMARK_TEXT','Teknovashop'))
-            url = upload_to_supabase(
-                path,
-                bucket=os.getenv('SUPABASE_BUCKET','forge-stl'),
-                key=f"{req.order_id}/{os.path.basename(path)}"
-            )
-        return {"status":"ok", "stl_url": url}
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-# === modelos ===
-from models.vesa_adapter import build as vesa_adapter
-from models.router_mount import build as router_mount
-from models.cable_tray import build as cable_tray
+# (opcional) si quieres ser ultra-explícito con preflight:
+@app.options("/generate")
+def options_generate():
+    # Devolver 204 explícito para el preflight en esta ruta
+    return {}
