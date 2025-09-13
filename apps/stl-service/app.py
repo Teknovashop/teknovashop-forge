@@ -1,95 +1,132 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import os
 import uuid
-from typing import Any, Dict, Optional
-from supabase import create_client, Client
+from typing import Dict, Any, Optional
+from utils.storage import upload_to_supabase
 
-# ------------------------------
-# Config FastAPI + CORS
-# ------------------------------
-app = FastAPI()
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
+app = FastAPI(title="Teknovashop Forge API", version="1.0.0")
 
-origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "*")
-ALLOWED_ORIGINS = [o.strip() for o in origins_raw.split(",") if o.strip()]
+# CORS desde env: "https://dominio1,https://dominio2"
+raw_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+origins = [o for o in (raw_origins.split(",") if raw_origins else []) if o]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=origins if origins else ["*"],  # si no pones variable, abre para depuración
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ------------------------------
-# Supabase
-# ------------------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL y/o SUPABASE_SERVICE_KEY no están definidos.")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT", "Teknovashop")
 
 
-def _first_of(d: Dict[str, Any], *keys: str) -> Optional[Any]:
-    """Extrae el primer valor válido de un diccionario según claves posibles."""
-    if not isinstance(d, dict):
-        return None
-    for k in keys:
-        if k in d:
-            return d[k]
-    return None
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+class GenerateParams(BaseModel):
+    width: Optional[int] = Field(default=180, ge=1)
+    height: Optional[int] = Field(default=180, ge=1)
+    thickness: Optional[int] = Field(default=6, ge=1)
+    pattern: Optional[str] = Field(default="100x100")
 
 
+class GeneratePayload(BaseModel):
+    order_id: str
+    model_slug: str
+    params: GenerateParams = Field(default_factory=GenerateParams)
+    license: str = Field(default="personal")
+
+
+# -----------------------------------------------------------------------------
+# Salud
+# -----------------------------------------------------------------------------
 @app.get("/health")
-async def health():
+def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/generate")
-async def generate(request: Request):
+# -----------------------------------------------------------------------------
+# Simulación/Generación STL (placeholder)
+# -----------------------------------------------------------------------------
+def generate_stl_locally(model_slug: str, params: Dict[str, Any], out_dir: str) -> str:
     """
-    Genera un STL de prueba y lo sube a Supabase. Devuelve una URL firmada por 1 hora.
+    Aquí iría tu generación real de STL. Por ahora creamos un archivo .stl
+    mínimo para probar el pipeline de subida a Supabase.
     """
-    fake_stl = b"""solid cube
-  facet normal 0 0 0
-    outer loop
-      vertex 0 0 0
-      vertex 1 0 0
-      vertex 0 1 0
-    endloop
-  endfacet
-endsolid cube
+    os.makedirs(out_dir, exist_ok=True)
+    filename = f"{model_slug}-{uuid.uuid4().hex}.stl"
+    local_path = os.path.join(out_dir, filename)
+
+    # STL ASCII mínimo (triángulo)
+    stl = f"""solid {model_slug}
+facet normal 0 0 0
+  outer loop
+    vertex 0 0 0
+    vertex {params.get('width',180)} 0 0
+    vertex 0 {params.get('height',180)} 0
+  endloop
+endfacet
+endsolid {model_slug}
 """
-    filename = f"{uuid.uuid4()}.stl"
+    with open(local_path, "w", encoding="utf-8") as f:
+        f.write(stl)
 
-    upload_res = supabase.storage.from_(SUPABASE_BUCKET).upload(
-        filename, fake_stl, file_options={"content-type": "model/stl", "x-upsert": "true"}
-    )
-    if getattr(upload_res, "error", None):
-        msg = getattr(upload_res.error, "message", str(upload_res.error))
-        return {"status": "error", "message": f"Upload failed: {msg}"}
+    return local_path
 
-    signed_res = supabase.storage.from_(SUPABASE_BUCKET).create_signed_url(filename, 3600)
 
-    stl_url = None
-    if hasattr(signed_res, "data") and signed_res.data:
-        stl_url = _first_of(
-            signed_res.data, "signedUrl", "signedURL", "publicUrl", "publicURL", "url"
+# -----------------------------------------------------------------------------
+# Endpoint principal
+# -----------------------------------------------------------------------------
+@app.post("/generate")
+def generate(payload: GeneratePayload) -> Dict[str, Any]:
+    """
+    1) Genera STL local (placeholder)
+    2) Sube a Supabase Storage
+    3) Devuelve signed URL (1h)
+    """
+    try:
+        # 1) Generar STL local
+        tmp_dir = "/tmp/stl"
+        local_stl_path = generate_stl_locally(
+            payload.model_slug,
+            payload.params.model_dump(),
+            tmp_dir,
         )
 
-    # fallback: public url
-    if not stl_url:
-        public_res = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
-        if hasattr(public_res, "data") and public_res.data:
-            stl_url = _first_of(
-                public_res.data, "publicUrl", "publicURL", "url"
-            )
+        # 2) Clave destino en bucket
+        key = f"{payload.order_id}/{payload.model_slug}.stl"
 
-    if not stl_url:
-        return {"status": "error", "message": "No STL URL generated"}
+        # 3) Subir + generar signed URL
+        signed_url = upload_to_supabase(
+            local_path=local_stl_path,
+            bucket=SUPABASE_BUCKET,
+            key=key,
+            content_type="model/stl",
+            expires_sec=3600,  # 1 hora
+        )
 
-    return {"status": "ok", "stl_url": stl_url}
+        if not signed_url:
+            raise HTTPException(status_code=500, detail="No STL URL generated")
+
+        return {
+            "status": "ok",
+            "stl_url": signed_url,
+            "meta": {
+                "watermark": WATERMARK_TEXT,
+                "model_slug": payload.model_slug,
+                "order_id": payload.order_id,
+                "license": payload.license,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
