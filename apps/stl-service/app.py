@@ -1,5 +1,6 @@
 import os
 import json
+from uuid import uuid4
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
@@ -163,22 +164,25 @@ async def generate(request: Request):
         model = "vesa-adapter"  # fallback razonable
 
     params = payload.get("params", {}) or {}
-    filename = "forge-output.stl"
 
     try:
+        # Genera STL según modelo
         if model in ("vesa-adapter", "vesa_adapter", "vesa"):
             stl_bytes = generate_vesa_adapter(params)
-            filename = "vesa-adapter.stl"
+            model_folder = "vesa-adapter"
         elif model in ("router-mount", "router_mount", "router"):
             stl_bytes = generate_router_mount(params)
-            filename = "router-mount.stl"
+            model_folder = "router-mount"
         elif model in ("cable-tray", "cable_tray", "cable"):
             stl_bytes = generate_cable_tray(params)
-            filename = "cable-tray.stl"
+            model_folder = "cable-tray"
         else:
             return {"status": "error", "detail": f"Unknown model '{model}'"}
 
-        url = storage.upload_stl_and_sign(stl_bytes, filename=filename, expires_in=3600)
+        # -------- NOMBRE ÚNICO PARA EVITAR DUPLICATES --------
+        unique_name = f"{model_folder}/{uuid4().hex}.stl"
+
+        url = storage.upload_stl_and_sign(stl_bytes, filename=unique_name, expires_in=3600)
         return {"status": "ok", "stl_url": url}
 
     except Exception as e:
