@@ -4,11 +4,14 @@ uvicorn[standard]==0.30.6
 # httpx debe ser <0.26 para ser compatible con supabase 2.4.0
 httpx==0.25.2
 
-# SDK v2 estable (evita el bug del parámetro 'proxy' que vimos con 2.6.x)
+# SDK v2 estable (evita el bug del 'proxy' que vimos con 2.6.x)
 supabase==2.4.0
 
 # Para recibir multipart/form-data si más adelante subes ficheros
 python-multipart==0.0.9
 
-# Si no lo necesitas, puedes comentar numpy; si lo usas, esta versión es ligera y compatible con py3.11
+# Usado por Shapely y/o futura geometría
 numpy==1.26.4
+
+# <- NUEVO: requerido por tu import en app.py
+shapely==2.0.4
