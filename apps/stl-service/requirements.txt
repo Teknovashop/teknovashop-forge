@@ -1,9 +1,12 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-httpx==0.25.2
-supabase==2.4.0
 
-# NUEVO:
-trimesh==4.4.9
-shapely==2.0.4
-numpy==1.26.4
+# Alinear stack Supabase con httpx nuevo (evita 'proxy' error)
+httpx==0.27.2
+supabase==2.6.0
+
+# opcionalmente fija versiones estables del resto del stack de supabase
+gotrue>=2.6.0,<3.0
+postgrest>=0.14.8,<1.0
+realtime>=2.0.2,<3.0
+storage3>=0.7.7,<1.0
