@@ -4,13 +4,19 @@ uvicorn[standard]==0.30.6
 # httpx debe ser <0.26 para supabase 2.4.0
 httpx==0.25.2
 
-# SDK v2 estable (evita bug 'proxy' de 2.6.x)
+# SDK estable
 supabase==2.4.0
 
-# Para recibir multipart/form-data cuando toque
+# Fijamos libs del ecosistema para evitar el bug 'proxy'
+gotrue==2.6.0
+postgrest==0.16.11
+realtime==1.0.6
+storage3==0.7.7
+
+# Subida de ficheros (por si usamos multipart pronto)
 python-multipart==0.0.9
 
-# Dependencias geométricas
+# Geometría base
 numpy==1.26.4
 shapely==2.0.4
 trimesh==4.4.9
