@@ -1,19 +1,71 @@
-from supabase import create_client
+import io
 import os
+from typing import Optional
 
-url: str = os.getenv("SUPABASE_URL")
-key: str = os.getenv("SUPABASE_SERVICE_KEY")
-supabase = create_client(url, key)
-
-BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
+from supabase import Client, create_client
+from supabase.storage.types import FileOptions
 
 
-def upload_file(file_path: str, dest_name: str) -> str:
-    with open(file_path, "rb") as f:
-        res = supabase.storage.from_(BUCKET).upload(dest_name, f)
-        if res is None or "error" in str(res).lower():
-            raise Exception(f"Upload failed: {res}")
+def _env(name: str, default: Optional[str] = None) -> str:
+    v = os.getenv(name, default)
+    if not v:
+        raise RuntimeError(f"Missing required env var: {name}")
+    return v
 
-        # obtener URL pública firmada
-        signed = supabase.storage.from_(BUCKET).create_signed_url(dest_name, 60 * 60)
-        return signed["signedURL"]
+
+class Storage:
+    """
+    Pequeña envoltura para subir el STL a Supabase Storage y devolver
+    una URL firmada temporal.
+    """
+
+    def __init__(self) -> None:
+        url = _env("SUPABASE_URL")
+        key = _env("SUPABASE_SERVICE_KEY")
+        self.bucket = _env("SUPABASE_BUCKET")
+        self.client: Client = create_client(url, key)
+
+    def upload_stl_and_get_signed_url(
+        self,
+        data: bytes,
+        object_path: str,
+        content_type: str = "application/sla",
+        expires_in_seconds: int = 3600,
+        upsert: bool = True,
+    ) -> str:
+        """
+        Sube `data` al bucket y devuelve una URL firmada temporal.
+        - object_path: ruta dentro del bucket, por ejemplo 'forge-stl/abc123.stl'
+        """
+        # Asegura que el buffer esté al principio
+        f = io.BytesIO(data)
+        f.seek(0)
+
+        # IMPORTANTE: en supabase-py v2 las opciones van dentro de FileOptions
+        options = FileOptions(upsert=upsert, content_type=content_type, cache_control="3600")
+
+        # Subida
+        upload_res = self.client.storage.from_(self.bucket).upload(
+            path=object_path,
+            file=f,
+            file_options=options,
+        )
+
+        # Si el SDK devuelve un dict, intenta leer 'error'; si es un objeto, ignora
+        if isinstance(upload_res, dict) and upload_res.get("error"):
+            raise RuntimeError(f"Upload error: {upload_res['error']}")
+
+        # URL firmada
+        signed = self.client.storage.from_(self.bucket).create_signed_url(
+            object_path, expires_in_seconds
+        )
+
+        # El SDK puede devolver 'signedURL' o 'signed_url' según versión
+        url = None
+        if isinstance(signed, dict):
+            url = signed.get("signedURL") or signed.get("signed_url")
+
+        if not url:
+            raise RuntimeError(f"Could not create signed URL: {signed}")
+
+        return url
