@@ -2,16 +2,29 @@ import os
 import uuid
 from typing import Optional
 
-# Cliente DIRECTO de Storage (evita gotrue/supabase auth)
-from storage3 import create_client as create_storage_client
+# Cliente DIRECTO de Storage (evitamos gotrue/supabase auth)
+from storage3 import create_client as _create_storage_client
+
+
+def _make_storage_client(storage_url: str, headers: dict):
+    """
+    Crea el cliente de storage3 siendo compatible con diferentes versiones.
+    - En versiones nuevas: create_client(url, headers, *, is_async=...)
+    - En versiones antiguas: create_client(url, headers)
+    """
+    try:
+        # Firmas nuevas (requieren keyword-only is_async)
+        return _create_storage_client(storage_url, headers, is_async=False)
+    except TypeError:
+        # Firmas antiguas
+        return _create_storage_client(storage_url, headers)
 
 
 class Storage:
     """
     Adaptador de Supabase Storage usando storage3 directamente.
     - Evita gotrue y el error 'proxy'
-    - Compatible con storage3==0.7.x (no existe 'upsert')
-    - Sube con ruta única y devuelve URL firmada
+    - Sin 'upsert': generamos rutas únicas por defecto
     """
 
     def __init__(self) -> None:
@@ -37,8 +50,8 @@ class Storage:
             "apikey": key,
         }
 
-        # Cliente de storage3
-        self._storage = create_storage_client(storage_url, headers)
+        # Cliente de storage3 (compat con distintas versiones)
+        self._storage = _make_storage_client(storage_url, headers)
         self.bucket: str = bucket
 
     def _bucket(self):
@@ -53,9 +66,8 @@ class Storage:
     ) -> str:
         """
         Sube bytes al bucket y devuelve el path final dentro del bucket.
-        - En storage3 0.7.x NO existe 'upsert'.
-        - Por defecto generamos una ruta única => sin sobrescribir.
-        - Si make_unique=False, intentamos borrar y re-subir.
+        - storage3 no tiene 'upsert' en varias versiones -> generamos ruta única.
+        - Si make_unique=False, intentamos borrar el anterior y re-subir.
         """
         bucket = self._bucket()
 
@@ -69,6 +81,7 @@ class Storage:
             try:
                 bucket.remove([dest_path])
             except Exception:
+                # Ignora si no existía
                 pass
 
         file_options = {"contentType": content_type}
@@ -80,7 +93,11 @@ class Storage:
         return res.get("signedURL") or res.get("signed_url") or ""
 
     def upload_stl_and_sign(
-        self, stl_bytes: bytes, filename: str, model_folder: Optional[str] = None, expires_in: int = 3600
+        self,
+        stl_bytes: bytes,
+        filename: str,
+        model_folder: Optional[str] = None,
+        expires_in: int = 3600,
     ) -> str:
         folder = (model_folder or filename.rsplit(".", 1)[0]).strip().replace("\\", "/")
         folder = folder.strip("/")
