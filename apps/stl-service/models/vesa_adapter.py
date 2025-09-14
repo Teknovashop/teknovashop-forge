@@ -1,23 +1,27 @@
-# models/vesa_adapter.py
-from typing import Dict, List, Tuple
-from utils.stl_writer import Tri, add_box, add_cylinder_z, triangles_to_stl
+import math
+from typing import Dict, Any
+import trimesh
 
-def build(params: Dict) -> bytes:
-    # Parámetros
-    plate_w   = float(params.get("plate_w", 120.0))  # mm
-    plate_h   = float(params.get("plate_h", 120.0))  # mm
-    plate_t   = float(params.get("plate_t", 5.0))    # mm
-    vesa      = int(params.get("vesa", 75))          # 75, 100, 200...
-    boss_d    = float(params.get("boss_d", 6.0))     # diámetro tetón
-    boss_h    = float(params.get("boss_h", 2.0))     # altura tetón
 
-    tris: List[Tri] = []
-    # Placa centrada en Z=plate_t/2
-    add_box(tris, 0, 0, plate_t/2, plate_w, plate_h, plate_t)
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    """
+    VESA adapter "MVP": placa rectangular simple.
+    Parámetros admitidos:
+      - width (mm)      default 180
+      - height (mm)     default 180
+      - thickness (mm)  default 6
+    """
+    w = float(params.get("width", 180))
+    h = float(params.get("height", 180))
+    t = float(params.get("thickness", 6))
 
-    # 4 tetones guía en patrón VESA (medida entre centros)
-    off = vesa/2.0
-    for (x,y) in [( off,  off), ( off, -off), (-off,  off), (-off, -off)]:
-        add_cylinder_z(tris, x, y, plate_t, plate_t+boss_h, boss_d/2.0, segments=40)
+    # Caja (placa)
+    plate = trimesh.creation.box(extents=(w, h, t))
+    # Centrar XY en origen y apoyar en Z=0
+    plate.apply_translation((-w / 2.0, -h / 2.0, 0.0))
 
-    return triangles_to_stl("vesa_adapter", tris)
+    # (MVP sin agujeros para máxima compatibilidad)
+    # Si más adelante quieres agujeros VESA 75/100:
+    #   - mejor hacerlo en cliente con parámetros y usar CSG externo,
+    #   - o exportar sin CSG y dejar guías/relieves.
+    return plate
