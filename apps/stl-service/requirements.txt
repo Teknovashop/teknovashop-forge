@@ -1,22 +1,16 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-
-# httpx debe ser <0.26 para supabase 2.4.0
 httpx==0.25.2
-
-# SDK estable
 supabase==2.4.0
+python-multipart==0.0.9
 
-# Fijamos libs del ecosistema para evitar el bug 'proxy'
-gotrue==2.6.0
+# Geometría liviana (opcional si luego metes CAD real)
+shapely==2.0.4
+trimesh==4.4.9
+
+# Versiones compatibles que no rompen con 'proxy' ni con 'upsert'
 postgrest==0.16.11
 realtime==1.0.6
 storage3==0.7.7
+gotrue==2.9.1
 
-# Subida de ficheros (por si usamos multipart pronto)
-python-multipart==0.0.9
-
-# Geometría base
-numpy==1.26.4
-shapely==2.0.4
-trimesh==4.4.9
