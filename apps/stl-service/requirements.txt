@@ -1,16 +1,11 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-httpx==0.25.2
-supabase==2.4.0
 python-multipart==0.0.9
+httpx==0.25.2
 
-# Geometría liviana (opcional si luego metes CAD real)
+# Cliente de Storage directo (sin gotrue)
+storage3==0.7.7
+
+# Geometría liviana (si los usas)
 shapely==2.0.4
 trimesh==4.4.9
-
-# Versiones compatibles que no rompen con 'proxy' ni con 'upsert'
-postgrest==0.16.11
-realtime==1.0.6
-storage3==0.7.7
-gotrue==2.9.1
-
