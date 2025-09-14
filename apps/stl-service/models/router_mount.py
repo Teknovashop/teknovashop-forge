@@ -1,23 +1,31 @@
-# models/router_mount.py
-from typing import Dict, List
-from utils.stl_writer import Tri, add_box, triangles_to_stl
+from typing import Dict, Any
+import trimesh
 
-def build(params: Dict) -> bytes:
-    inner_w   = float(params.get("inner_w", 32.0))   # ancho interior
-    inner_h   = float(params.get("inner_h", 180.0))  # alto interior
-    wall_t    = float(params.get("wall_t", 3.0))     # grosor paredes
-    depth     = float(params.get("depth", 30.0))     # fondo U
-    brim_t    = float(params.get("brim_t", 10.0))    # labio superior
 
-    tris: List[Tri] = []
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    """
+    Router wall-mount "MVP": escuadra en L (dos placas unidas).
+    Parámetros:
+      - width (mm)      default 160 (ancho base contra pared)
+      - height (mm)     default 220 (alto)
+      - depth (mm)      default 40  (saliente/estante)
+      - thickness (mm)  default 4   (grosor placas)
+    """
+    w = float(params.get("width", 160))
+    h = float(params.get("height", 220))
+    d = float(params.get("depth", 40))
+    t = float(params.get("thickness", 4))
 
-    # Pared trasera
-    add_box(tris, 0, 0, wall_t/2, inner_w + 2*wall_t, inner_h + 2*wall_t, wall_t)
-    # Pared izquierda
-    add_box(tris, -(inner_w/2 + wall_t/2), 0, depth/2, wall_t, inner_h, depth)
-    # Pared derecha
-    add_box(tris,  (inner_w/2 + wall_t/2), 0, depth/2, wall_t, inner_h, depth)
-    # Labio/ala superior
-    add_box(tris, 0,  (inner_h/2 + wall_t/2), (depth+brim_t)/2, inner_w + 2*wall_t, wall_t, brim_t)
+    # Placa vertical (contra pared): w x h x t
+    vertical = trimesh.creation.box(extents=(w, h, t))
+    vertical.apply_translation((-w / 2.0, -h / 2.0, 0.0))  # Z=0 al ras
 
-    return triangles_to_stl("router_mount", tris)
+    # Placa horizontal (estante): w x d x t
+    horizontal = trimesh.creation.box(extents=(w, d, t))
+    # Posición: pegada en la base de la placa vertical, saliendo en +Y
+    horizontal.apply_translation((-w / 2.0, 0.0, t))  # encima, apoyada en Z=t
+
+    # Unir ambas (sólo concatenar mallas; no CSG)
+    mesh = trimesh.util.concatenate([vertical, horizontal])
+
+    return mesh
