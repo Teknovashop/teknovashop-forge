@@ -5,50 +5,56 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from utils.storage import Storage
-from utils.stl_writer import triangles_to_stl
+# Modelos
 from models.vesa_adapter import make_model as make_vesa_adapter
 from models.router_mount import make_model as make_router_mount
 from models.cable_tray import make_model as make_cable_tray
 
+# Export STL
+from trimesh.exchange import stl as stl_io
 
-app = FastAPI(title="Teknovashop Forge")
+# Storage (Supabase)
+from utils.storage import Storage
+
+
+app = FastAPI()
 
 # ---------------------------
 # CORS
 # ---------------------------
-allow_origins: list[str] = []
+allow_origins = []
 cors_env = os.environ.get("CORS_ALLOW_ORIGINS")
 if cors_env:
     allow_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
 else:
-    # En producción puedes fijarlo a tu frontend, p.ej.:
-    # https://teknovashop-app.vercel.app
+    # En prod puedes permitir sólo tu frontend (p.ej. https://teknovashop-app.vercel.app)
     default_frontend = os.environ.get("NEXT_PUBLIC_BACKEND_URL", "").strip()
     if default_frontend:
         allow_origins = [default_frontend]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins or ["*"],  # en dev, "*"
+    allow_origins=allow_origins or ["*"],  # en dev acepta "*"
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-storage = Storage()  # Supabase Storage helper
-
+storage = Storage()
 
 # ---------------------------
-# Model registry
+# Dispatcher de modelos
 # ---------------------------
 MODEL_BUILDERS = {
+    # VESA
     "vesa-adapter": make_vesa_adapter,
     "vesa_adapter": make_vesa_adapter,
     "vesa": make_vesa_adapter,
+    # Router mount
     "router-mount": make_router_mount,
     "router_mount": make_router_mount,
     "router": make_router_mount,
+    # Cable tray
     "cable-tray": make_cable_tray,
     "cable_tray": make_cable_tray,
     "cable": make_cable_tray,
@@ -66,7 +72,7 @@ def health():
 @app.post("/generate")
 async def generate(request: Request):
     """
-    Espera JSON:
+    Recibe JSON:
     {
       "model": "vesa-adapter" | "router-mount" | "cable-tray",
       "params": { ... },
@@ -80,40 +86,40 @@ async def generate(request: Request):
         return {"status": "error", "detail": "Invalid JSON"}
 
     # Permitir 'model' o 'model_slug'
-    model_slug = (payload.get("model") or payload.get("model_slug") or "").strip().lower()
-    if not model_slug:
-        return {"status": "error", "detail": "Missing 'model'."}
+    model = (payload.get("model") or payload.get("model_slug") or "").strip().lower()
+    if not model:
+        model = "vesa-adapter"  # fallback razonable
 
-    params: Dict[str, Any] = payload.get("params", {}) or {}
-    order_id = (payload.get("order_id") or "").strip()
-    license_type = (payload.get("license") or "personal").strip().lower()
+    params = payload.get("params", {}) or {}
 
-    builder = MODEL_BUILDERS.get(model_slug)
+    builder = MODEL_BUILDERS.get(model)
     if not builder:
-        return {"status": "error", "detail": f"Unknown model '{model_slug}'"}
+        return {"status": "error", "detail": f"Unknown model '{model}'"}
+
+    # Nombre de archivo por modelo
+    filename_map = {
+        "vesa-adapter": "vesa-adapter.stl",
+        "vesa_adapter": "vesa-adapter.stl",
+        "vesa": "vesa-adapter.stl",
+        "router-mount": "router-mount.stl",
+        "router_mount": "router-mount.stl",
+        "router": "router-mount.stl",
+        "cable-tray": "cable-tray.stl",
+        "cable_tray": "cable-tray.stl",
+        "cable": "cable-tray.stl",
+    }
+    filename = filename_map.get(model, "forge-output.stl")
 
     try:
-        # Construir triangulación (lista de triángulos), cada triángulo = ((x,y,z),(x,y,z),(x,y,z))
-        triangles = builder(params)
+        # Crea la malla con el builder elegido
+        mesh = builder(params)  # -> trimesh.Trimesh
 
-        # Pasar a STL ASCII
-        stl_bytes = triangles_to_stl(triangles, solid_name=model_slug)
+        # Exporta a STL como bytes (sin kwargs problemáticos)
+        stl_bytes = stl_io.export_stl(mesh)
 
-        # Nombre de fichero
-        filename = f"{model_slug}.stl"
-
-        # Subir y firmar URL (1h)
+        # Sube y saca URL firmada
         url = storage.upload_stl_and_sign(stl_bytes, filename=filename, expires_in=3600)
-
-        return {
-            "status": "ok",
-            "stl_url": url,
-            "meta": {
-                "model": model_slug,
-                "order_id": order_id or None,
-                "license": license_type,
-            },
-        }
+        return {"status": "ok", "stl_url": url}
 
     except Exception as e:
-        return {"status": "error", "detail": f"Upload error: {e}"}
+        return {"status": "error", "detail": f"Generation/Upload error: {e}"}
