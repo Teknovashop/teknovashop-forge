@@ -1,33 +1,42 @@
-from typing import Dict, Any
+# apps/stl-service/models/cable_tray.py
 import trimesh
+from trimesh.transformations import translation_matrix as T
 
-
-def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+def make_model(p: dict) -> trimesh.Trimesh:
     """
-    Cable tray "MVP": canal en U hecho con 3 placas (fondo + 2 laterales).
-    Parámetros:
-      - width (mm)      default 60   (ancho interior aprox)
-      - height (mm)     default 25   (altura lateral)
-      - length (mm)     default 180  (largo del canal)
-      - thickness (mm)  default 3    (grosor de paredes)
+    Canal en U simple: base + dos laterales.
+    Convención: X=length, Y=height, Z=width (igual que la preview en Three.js).
+    p = {
+      length: mm, height: mm, width: mm, thickness: mm, ventilated: bool
+    }
     """
-    W = float(params.get("width", 60))
-    H = float(params.get("height", 25))
-    L = float(params.get("length", 180))
-    T = float(params.get("thickness", 3))
+    L = float(p.get("length", 180))
+    H = float(p.get("height", 25))
+    W = float(p.get("width", 60))
+    TCK = float(p.get("thickness", 3))
 
-    # Fondo: L x W x T
-    bottom = trimesh.creation.box(extents=(L, W, T))
-    # Centrar en X (L), Y (W). Dejar Z en 0
-    bottom.apply_translation((-L / 2.0, -W / 2.0, 0.0))
+    # Base
+    base = trimesh.creation.box(extents=[L, TCK, W])
+    base.apply_transform(T([0, -H/2 + TCK/2, 0]))
 
-    # Lateral izquierdo: L x T x H
-    side_left = trimesh.creation.box(extents=(L, T, H))
-    side_left.apply_translation((-L / 2.0, -W / 2.0, T))  # sobre el fondo
+    # Laterales (paredes)
+    side1 = trimesh.creation.box(extents=[L, H, TCK])
+    side1.apply_transform(T([0, 0, -W/2 + TCK/2]))
 
-    # Lateral derecho: L x T x H
-    side_right = trimesh.creation.box(extents=(L, T, H))
-    side_right.apply_translation((-L / 2.0, (W / 2.0 - T), T))
+    side2 = trimesh.creation.box(extents=[L, H, TCK])
+    side2.apply_transform(T([0, 0,  W/2 - TCK/2]))
 
-    mesh = trimesh.util.concatenate([bottom, side_left, side_right])
+    parts = [base, side1, side2]
+
+    # Opcional: “ranuras” sencillas como listones (decorativo, sin CSG)
+    if bool(p.get("ventilated", True)):
+        n = max(3, int(L // 40))  # número aproximado
+        gap = L / (n + 1)
+        rib_w = max(2.0, min(6.0, W * 0.08))
+        for i in range(1, n + 1):
+            rib = trimesh.creation.box(extents=[rib_w, TCK * 1.05, W - 2*TCK])
+            rib.apply_transform(T([-L/2 + i*gap, -H/2 + TCK/2 + 0.01, 0]))
+            parts.append(rib)
+
+    mesh = trimesh.util.concatenate(parts)
     return mesh
