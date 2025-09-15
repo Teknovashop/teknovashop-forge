@@ -1,31 +1,22 @@
-from typing import Dict, Any
+# apps/stl-service/models/router_mount.py
 import trimesh
+from trimesh.transformations import translation_matrix as T
 
-
-def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+def make_model(p: dict) -> trimesh.Trimesh:
     """
-    Router wall-mount "MVP": escuadra en L (dos placas unidas).
-    Parámetros:
-      - width (mm)      default 160 (ancho base contra pared)
-      - height (mm)     default 220 (alto)
-      - depth (mm)      default 40  (saliente/estante)
-      - thickness (mm)  default 4   (grosor placas)
+    Escuadra en L: base + pared.
+    router_width → X (ancho), router_depth → Z (fondo), height se calcula si no viene.
     """
-    w = float(params.get("width", 160))
-    h = float(params.get("height", 220))
-    d = float(params.get("depth", 40))
-    t = float(params.get("thickness", 4))
+    W    = float(p.get("router_width", 120))
+    D    = float(p.get("router_depth", 80))
+    TCK  = float(p.get("thickness", 4))
+    H    = float(p.get("height", D * 0.6))  # altura pared por defecto
 
-    # Placa vertical (contra pared): w x h x t
-    vertical = trimesh.creation.box(extents=(w, h, t))
-    vertical.apply_translation((-w / 2.0, -h / 2.0, 0.0))  # Z=0 al ras
+    base = trimesh.creation.box(extents=[W, TCK, D])
+    base.apply_transform(T([0, -D*0.3, 0]))
 
-    # Placa horizontal (estante): w x d x t
-    horizontal = trimesh.creation.box(extents=(w, d, t))
-    # Posición: pegada en la base de la placa vertical, saliendo en +Y
-    horizontal.apply_translation((-w / 2.0, 0.0, t))  # encima, apoyada en Z=t
+    wall = trimesh.creation.box(extents=[W, H, TCK])
+    wall.apply_transform(T([0, 0, -D/2 + TCK/2]))
 
-    # Unir ambas (sólo concatenar mallas; no CSG)
-    mesh = trimesh.util.concatenate([vertical, horizontal])
-
+    mesh = trimesh.util.concatenate([base, wall])
     return mesh
