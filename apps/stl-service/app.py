@@ -1,20 +1,20 @@
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# Trimesh models (ya incluidas en el repo)
+# Generadores de modelos
 from models.cable_tray import make_model as make_cable_tray
 from models.vesa_adapter import make_model as make_vesa_adapter
 from models.router_mount import make_model as make_router_mount
 
+# Storage (igual que ya usas; importa tu utilidad actual)
 from utils.storage import Storage
 
 app = FastAPI(title="Teknovashop Forge API", version="0.2.0")
 
-# -------- CORS ----------
 def _origins() -> list[str]:
     raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
     if raw:
@@ -39,59 +39,55 @@ storage = Storage()
 async def health():
     return {"status": "ok"}
 
-# -------- Normalización de payloads --------
-def _slug(model: str) -> str:
-    return (model or "").strip().lower().replace(" ", "-").replace("_", "-")
+# ---------------- Normalización de payload ----------------
+def _slug(m: str) -> str:
+    return (m or "").strip().lower().replace("_", "-").replace(" ", "-")
 
-def _num(x: Any, default: Optional[float]=None) -> Optional[float]:
+def _f(x, d=None):
     try:
-        if x is None:
-            return default
         return float(x)
     except Exception:
-        return default
+        return d
 
-def _normalize_params(model_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Preferimos 'params' si viene anidado; si no, usamos top-level
+def normalize(model_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Acepta formato {model, params:{...}} o claves planas del frontend
+    y devuelve un diccionario con las keys que esperan los modelos.
+    Convención de ejes: X=length, Y=height, Z=width (como en la preview).
+    """
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
     top = payload
 
-    m = model_slug
-    out: Dict[str, Any] = {}
+    if model_slug in ("cable-tray", "cable_tray", "cable"):
+        return {
+            "length":    _f(params.get("length"),    _f(top.get("length_mm"),    180)),
+            "height":    _f(params.get("height"),    _f(top.get("height_mm"),     25)),
+            "width":     _f(params.get("width"),     _f(top.get("width_mm"),      60)),
+            "thickness": _f(params.get("thickness"), _f(top.get("thickness_mm"),   3)),
+            "ventilated": bool(params.get("ventilated", top.get("ventilated", True))),
+        }
 
-    if m in ("cable-tray", "cable_tray", "cable"):
-        out["width"]     = _num(params.get("width"),     _num(top.get("width_mm"), 60))
-        out["height"]    = _num(params.get("height"),    _num(top.get("height_mm"), 25))
-        out["length"]    = _num(params.get("length"),    _num(top.get("length_mm"), 180))
-        out["thickness"] = _num(params.get("thickness"), _num(top.get("thickness_mm"), 3))
-        # 'ventilated' en UI -> 'slots' aquí (si tu modelo los usa)
-        out["slots"] = bool(params.get("slots", top.get("ventilated", True)))
+    if model_slug in ("vesa-adapter", "vesa_adapter", "vesa"):
+        v = _f(params.get("vesa_mm"), _f(top.get("vesa_mm"), 100))
+        return {
+            "vesa_mm":   v,
+            "thickness": _f(params.get("thickness"), _f(top.get("thickness_mm"), 4)),
+            "clearance": _f(params.get("clearance"), _f(top.get("clearance_mm"), 1)),
+            "hole":      _f(params.get("hole"),      _f(top.get("hole_diameter_mm"), 5)),
+        }
 
-    elif m in ("vesa-adapter", "vesa_adapter", "vesa"):
-        v = _num(params.get("vesa_mm"), _num(top.get("vesa_mm")))
-        out["width"]     = _num(params.get("width"),     v if v is not None else 180)
-        out["height"]    = _num(params.get("height"),    v if v is not None else 180)
-        out["thickness"] = _num(params.get("thickness"), _num(top.get("thickness_mm"), 6))
+    if model_slug in ("router-mount", "router_mount", "router"):
+        return {
+            "router_width":  _f(params.get("width"),     _f(top.get("router_width_mm"), 120)),
+            "router_depth":  _f(params.get("depth"),     _f(top.get("router_depth_mm"),  80)),
+            "thickness":     _f(params.get("thickness"), _f(top.get("thickness_mm"),      4)),
+            "strap_slots":   bool(params.get("strap_slots", top.get("strap_slots", True))),
+            "hole":          _f(params.get("hole"),      _f(top.get("hole_diameter_mm"), 4)),
+        }
 
-    elif m in ("router-mount", "router_mount", "router"):
-        out["width"]     = _num(params.get("width"),     _num(top.get("router_width_mm"), 160))
-        out["depth"]     = _num(params.get("depth"),     _num(top.get("router_depth_mm"), 40))
-        out["thickness"] = _num(params.get("thickness"), _num(top.get("thickness_mm"), 4))
-        # Altura: si llega la usamos; si no, el modelo pone su default interno
-        if _num(params.get("height")) is not None:
-            out["height"] = _num(params.get("height"))
-        elif _num(top.get("router_height_mm")) is not None:
-            out["height"] = _num(top.get("router_height_mm"))
-        # Slots/strap (por si los usas más adelante)
-        if "strap_slots" in top or "slots" in params:
-            out["vent_slots"] = bool(params.get("slots", top.get("strap_slots", True)))
+    raise HTTPException(400, detail=f"Modelo no soportado: {model_slug}")
 
-    else:
-        raise HTTPException(status_code=400, detail=f"Modelo no soportado: {model_slug}")
-
-    # Limpia None (deja que el modelo aplique defaults)
-    return {k: v for k, v in out.items() if v is not None}
-
+# ---------------- Endpoint principal ----------------
 @app.post("/generate")
 async def generate(req: Request):
     try:
@@ -100,38 +96,37 @@ async def generate(req: Request):
         raise HTTPException(400, detail="JSON inválido")
 
     model_in = payload.get("model") or payload.get("model_slug") or ""
-    model_slug = _slug(model_in or "vesa-adapter")
+    model_slug = _slug(model_in)
+    params = normalize(model_slug, payload)
 
-    params = _normalize_params(model_slug, payload)
-
-    # ---- Generación con trimesh ----
+    # --- Generar malla con los modelos ---
     try:
         if model_slug in ("cable-tray", "cable_tray", "cable"):
             mesh = make_cable_tray(params)
-            filename = "cable-tray.stl"
             folder = "cable-tray"
+            fname  = "cable-tray.stl"
         elif model_slug in ("vesa-adapter", "vesa_adapter", "vesa"):
             mesh = make_vesa_adapter(params)
-            filename = "vesa-adapter.stl"
             folder = "vesa-adapter"
+            fname  = "vesa-adapter.stl"
         elif model_slug in ("router-mount", "router_mount", "router"):
             mesh = make_router_mount(params)
-            filename = "router-mount.stl"
             folder = "router-mount"
+            fname  = "router-mount.stl"
         else:
             raise HTTPException(400, detail=f"Modelo no soportado: {model_slug}")
 
-        stl_bytes = mesh.export(file_type="stl")  # bytes
+        stl_bytes = mesh.export(file_type="stl")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, detail=f"Error generando STL: {e}")
 
-    # ---- Subida a Supabase y URL firmada ----
+    # --- Subir a Supabase y firmar URL (igual que antes) ---
     try:
         signed = storage.upload_stl_and_sign(
             stl_bytes,
-            filename=filename,
+            filename=fname,
             model_folder=folder,
             expires_in=3600,
         )
