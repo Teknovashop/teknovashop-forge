@@ -9,3 +9,5 @@ storage3==0.7.7
 # Geometría liviana (si los usas)
 shapely==2.0.4
 trimesh==4.4.9
+qrcode[pil]==7.4.2
+Pillow==10.4.0
