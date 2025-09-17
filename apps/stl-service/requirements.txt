@@ -1,13 +1,15 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-httpx==0.25.2
+fastapi>=0.112
+uvicorn[standard]>=0.30
+pydantic>=2.7
 
-# Cliente de Storage directo (sin gotrue)
-storage3==0.7.7
+numpy>=1.26
+trimesh>=4.4
+shapely>=2.0
+mapbox_earcut>=1.0.1
 
-# Geometría liviana (si los usas)
-shapely==2.0.4
-trimesh==4.4.9
-qrcode[pil]==7.4.2
-Pillow==10.4.0
+# watermark/QR (si lo usas en tu utils/watermark.py)
+qrcode[pil]>=7.4
+Pillow>=10.4
+
+# opcional
+orjson>=3.10
