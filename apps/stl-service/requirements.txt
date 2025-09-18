@@ -1,12 +1,11 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-httpx==0.27.0
-
-numpy>=1.26
-trimesh==4.4.9
-shapely>=2.0.4
-mapbox_earcut>=1.0.1
-
-# opcional pero útil para diagnósticos
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
 pydantic==2.7.1
-python-multipart==0.0.9
+httpx==0.27.0
+numpy==1.26.4
+scipy==1.13.1
+trimesh==4.4.3
+shapely==2.0.4
+networkx==3.3
+# opcionales; si hay wheel disponible, mejora boolean ops
+manifold3d==3.0.1 ; platform_machine == "x86_64"
