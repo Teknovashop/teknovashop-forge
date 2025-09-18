@@ -1,24 +1,29 @@
+# Dockerfile (backend)
 FROM python:3.11-slim
 
+# Ajustes y banderas útiles en producción
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TRIMESH_NO_NETWORK=1
+
+# Paquetes de sistema que evitan errores con numpy/trimesh
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libgl1 \
-    libxrender1 \
-    libxext6 \
-    libxi6 \
-    libx11-6 \
-    libxcursor1 \
-    libfontconfig1 \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential gcc g++ \
+    libgl1 libglib2.0-0 libglu1-mesa libgles2-mesa \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencias Python
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip && pip install -r /app/requirements.txt
 
-COPY . .
+# Código
+COPY . /app
 
-ENV PORT=10000
+# Puerto por defecto en local; en Render se inyecta $PORT
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn asgi:app --host 0.0.0.0 --port ${PORT}"]
+# Usa el $PORT de Render si existe; si no, 10000 (útil en local)
+CMD ["sh", "-c", "uvicorn asgi:fastapi_app --host 0.0.0.0 --port ${PORT:-10000}"]
