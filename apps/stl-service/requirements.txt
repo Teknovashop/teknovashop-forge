@@ -1,20 +1,12 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+httpx==0.27.0
 
-# Núcleo de modelado
-trimesh==4.4.1
-numpy==1.26.4
-shapely==2.0.4
-mapbox_earcut==1.0.1
+numpy>=1.26
+trimesh==4.4.9
+shapely>=2.0.4
+mapbox_earcut>=1.0.1
 
-# HTTP cliente (lo que falta ahora)
-httpx==0.27.2
-
-# Subidas / utilidades varias que usamos
+# opcional pero útil para diagnósticos
+pydantic==2.7.1
 python-multipart==0.0.9
-pydantic==2.7.4
-pydantic-settings==2.3.4
-
-# Marca de agua / QR (si en tu código se importa utils.watermark)
-qrcode==7.4.2
-Pillow==10.4.0
