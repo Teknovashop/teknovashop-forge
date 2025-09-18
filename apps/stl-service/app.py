@@ -1,6 +1,7 @@
 # teknovashop-forge/app.py
-import io, os, uuid, json, time
+import os, uuid, time
 from typing import List, Literal, Optional
+
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -9,51 +10,52 @@ from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
 
+# --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
-
 if not SUPABASE_URL or not SUPABASE_KEY:
-    print("[WARN] Faltan variables SUPABASE_URL / SUPABASE_SERVICE_KEY")
+    print("[WARN] Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY")
 
-app = FastAPI()
+# --------- APP ---------
+app = FastAPI(title="Teknovashop Forge")
 
+# --------- MODELOS/SCHEMAS ---------
 class HoleSpec(BaseModel):
     x_mm: float
     z_mm: float
     d_mm: float = Field(gt=0)
 
-ModelKind = Literal["cable_tray","router_mount","vesa_adapter"]
+ModelKind = Literal["cable_tray", "router_mount", "vesa_adapter"]
 
 class GenerateReq(BaseModel):
     model: ModelKind
 
-    # cable_tray
-    width_mm: Optional[float]=None
-    height_mm: Optional[float]=None
-    length_mm: Optional[float]=None
-    thickness_mm: Optional[float]=None
-    ventilated: Optional[bool]=True
-    holes: Optional[List[HoleSpec]]=None
+    # Cable tray
+    width_mm: Optional[float] = None
+    height_mm: Optional[float] = None
+    length_mm: Optional[float] = None
+    thickness_mm: Optional[float] = None
+    ventilated: Optional[bool] = True
+    holes: Optional[List[HoleSpec]] = None
 
-    # vesa
-    vesa_mm: Optional[float]=None
-    clearance_mm: Optional[float]=None
-    hole_diameter_mm: Optional[float]=None
+    # VESA
+    vesa_mm: Optional[float] = None
+    clearance_mm: Optional[float] = None
+    hole_diameter_mm: Optional[float] = None
 
-    # router
-    router_width_mm: Optional[float]=None
-    router_depth_mm: Optional[float]=None
+    # Router
+    router_width_mm: Optional[float] = None
+    router_depth_mm: Optional[float] = None
+    strap_slots: Optional[bool] = True
+    hole_diameter_mm: Optional[float] = None
 
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
 
 def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
-    """
-    Sube el binario a Supabase Storage y devuelve una URL firmada válida 1h.
-    """
-    # 1) Upload (upsert)
+    """Sube a Supabase Storage y devuelve Signed URL absoluto."""
     up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -61,22 +63,23 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
         "X-Upsert": "true",
     }
     r = httpx.put(up_url, headers=headers, content=content, timeout=30)
-    if r.status_code not in (200,201):
+    if r.status_code not in (200, 201):
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-    # 2) Signed URL
     sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
-    r2 = httpx.post(sign_url, headers={"Authorization": f"Bearer {SUPABASE_KEY}",
-                                       "Content-Type":"application/json"},
-                    json={"expiresIn": 3600}, timeout=30)
+    r2 = httpx.post(
+        sign_url,
+        headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+        json={"expiresIn": 3600},
+        timeout=30,
+    )
     if r2.status_code != 200:
         raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
+
     data = r2.json()
-    # supabase responde {"signedURL": "/storage/v1/object/sign/..."}
     signed = data.get("signedURL") or data.get("signedUrl")
     if not signed:
         raise HTTPException(500, "No signedURL in Supabase response")
-    # devolver absoluta
     return f"{SUPABASE_URL}{signed}"
 
 @app.post("/generate")
@@ -113,8 +116,8 @@ def generate(req: GenerateReq):
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # --- EXPORTAR STL (sin 'header' para compatibilidad) ---
-        stl_bytes: bytes = mesh.export(file_type="stl")  # <— FIX: sin header
+        # Export **sin** argumentos extra (evita tu error de `header`)
+        stl_bytes: bytes = mesh.export(file_type="stl")
 
         fname = f"{req.model}/{uuid.uuid4().hex}.stl"
         stl_url = upload_to_supabase(fname, stl_bytes)
@@ -124,6 +127,5 @@ def generate(req: GenerateReq):
     except HTTPException:
         raise
     except Exception as e:
-        # Log simple
         print("ERROR generate:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
