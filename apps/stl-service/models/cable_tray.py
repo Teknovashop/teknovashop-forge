@@ -1,38 +1,27 @@
 # teknovashop-forge/models/cable_tray.py
-import math
 import trimesh
 from trimesh.transformations import translation_matrix as T
 
 def _drill(mesh: trimesh.Trimesh, holes: list, H: float, TCK: float) -> trimesh.Trimesh:
-    """
-    Quita cilindros verticales (eje Y) en la base (y= -H/2+TCK/2).
-    Agujero centrado en (x, z) con diámetro d.
-    """
+    """Perfora cilindros a lo largo de Y en la base de la bandeja."""
     if not holes:
         return mesh
-
-    cutter_list = []
+    cutters = []
     for h in holes:
         x = float(h.get("x_mm", 0))
         z = float(h.get("z_mm", 0))
         d = max(0.1, float(h.get("d_mm", 3)))
         r = d / 2.0
-        # cilindro “alto” para atravesar base + margen
         cyl = trimesh.creation.cylinder(radius=r, height=TCK*2.5, sections=48)
-        # alineado a Y y desplazado a la cota de la base
         y = -H/2.0 + TCK/2.0
         cyl.apply_transform(T([x, y, z]))
-        cutter_list.append(cyl)
-
-    if cutter_list:
-        cutter = trimesh.util.concatenate(cutter_list)
+        cutters.append(cyl)
+    if cutters:
+        cutter = trimesh.util.concatenate(cutters)
         try:
-            result = mesh.difference(cutter, engine="scad")  # si está OpenSCAD
+            return mesh.difference(cutter, engine="scad")
         except BaseException:
-            # fallback robusto de trimesh
-            result = mesh.difference(cutter)  # puede tirar de shapely/earcut
-        return result
-
+            return mesh.difference(cutter)
     return mesh
 
 def make_model(p: dict) -> trimesh.Trimesh:
@@ -53,7 +42,6 @@ def make_model(p: dict) -> trimesh.Trimesh:
     parts = [base, side1, side2]
 
     if ventilated:
-        # listones superficiales (decorativos)
         n = max(3, int(L // 40))
         gap = L / (n + 1)
         rib_w = max(2.0, min(6.0, W * 0.08))
