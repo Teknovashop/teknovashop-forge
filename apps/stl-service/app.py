@@ -1,140 +1,129 @@
-# apps/stl-service/app.py
-import os, json, datetime, base64
-from typing import Any, Dict
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+# teknovashop-forge/app.py
+import io, os, uuid, json, time
+from typing import List, Literal, Optional
+import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from models.cable_tray import make_model as make_cable_tray
-from models.vesa_adapter import make_model as make_vesa_adapter
 from models.router_mount import make_model as make_router_mount
-from utils.storage import Storage
-from utils.watermark import add_watermark_plaque
+from models.vesa_adapter import make_model as make_vesa
 
-APP_NAME = "Teknovashop Forge API"
-APP_VERSION = "0.3.0"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
 
-app = FastAPI(title=APP_NAME, version=APP_VERSION)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("[WARN] Faltan variables SUPABASE_URL / SUPABASE_SERVICE_KEY")
 
-def _origins() -> list[str]:
-    raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
-    if raw:
-        return [o.strip() for o in raw.split(",") if o.strip()]
-    return [
-        "https://teknovashop-app.vercel.app",
-        "https://teknovashop.com",
-        "http://localhost:3000",
-    ]
+app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_origins(),
-    allow_credentials=False,
-    allow_methods=["GET","POST","OPTIONS"],
-    allow_headers=["*"],
-)
+class HoleSpec(BaseModel):
+    x_mm: float
+    z_mm: float
+    d_mm: float = Field(gt=0)
 
-storage = Storage()
+ModelKind = Literal["cable_tray","router_mount","vesa_adapter"]
+
+class GenerateReq(BaseModel):
+    model: ModelKind
+
+    # cable_tray
+    width_mm: Optional[float]=None
+    height_mm: Optional[float]=None
+    length_mm: Optional[float]=None
+    thickness_mm: Optional[float]=None
+    ventilated: Optional[bool]=True
+    holes: Optional[List[HoleSpec]]=None
+
+    # vesa
+    vesa_mm: Optional[float]=None
+    clearance_mm: Optional[float]=None
+    hole_diameter_mm: Optional[float]=None
+
+    # router
+    router_width_mm: Optional[float]=None
+    router_depth_mm: Optional[float]=None
 
 @app.get("/health")
-async def health():
-    return {"status":"ok","service":APP_NAME,"version":APP_VERSION}
+def health():
+    return {"ok": True, "ts": int(time.time())}
 
-def _slug(m: str) -> str:
-    return (m or "").strip().lower().replace("_","-").replace(" ","-")
+def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
+    """
+    Sube el binario a Supabase Storage y devuelve una URL firmada válida 1h.
+    """
+    # 1) Upload (upsert)
+    up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": content_type,
+        "X-Upsert": "true",
+    }
+    r = httpx.put(up_url, headers=headers, content=content, timeout=30)
+    if r.status_code not in (200,201):
+        raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-def _f(x, d=None):
-    try: return float(x)
-    except Exception: return d
-
-def normalize(model_slug: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    p = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    top = payload
-
-    if model_slug in ("cable-tray","cable_tray","cable"):
-        return {
-            "length":    _f(p.get("length"),    _f(top.get("length_mm"),    180)),
-            "height":    _f(p.get("height"),    _f(top.get("height_mm"),     25)),
-            "width":     _f(p.get("width"),     _f(top.get("width_mm"),      60)),
-            "thickness": _f(p.get("thickness"), _f(top.get("thickness_mm"),   3)),
-            "ventilated": bool(p.get("ventilated", top.get("ventilated", True))),
-        }
-    if model_slug in ("vesa-adapter","vesa_adapter","vesa"):
-        v = _f(p.get("vesa_mm"), _f(top.get("vesa_mm"), 100))
-        return {
-            "vesa_mm":   v,
-            "thickness": _f(p.get("thickness"), _f(top.get("thickness_mm"), 4)),
-            "clearance": _f(p.get("clearance"), _f(top.get("clearance_mm"), 1)),
-            "hole":      _f(p.get("hole"),      _f(top.get("hole_diameter_mm"), 5)),
-        }
-    if model_slug in ("router-mount","router_mount","router"):
-        return {
-            "router_width":  _f(p.get("width"),     _f(top.get("router_width_mm"), 120)),
-            "router_depth":  _f(p.get("depth"),     _f(top.get("router_depth_mm"),  80)),
-            "thickness":     _f(p.get("thickness"), _f(top.get("thickness_mm"),      4)),
-            "strap_slots":   bool(p.get("strap_slots", top.get("strap_slots", True))),
-            "hole":          _f(p.get("hole"),      _f(top.get("hole_diameter_mm"), 4)),
-        }
-    raise HTTPException(400, detail=f"Modelo no soportado: {model_slug}")
-
-def _stl_header_meta(meta: Dict[str, Any]) -> bytes:
-    # Añade metadatos simples al header del STL binario (80 bytes)
-    blob = json.dumps(meta, separators=(",",":"))[:70].encode("utf-8")
-    return blob.ljust(80, b" ")
+    # 2) Signed URL
+    sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
+    r2 = httpx.post(sign_url, headers={"Authorization": f"Bearer {SUPABASE_KEY}",
+                                       "Content-Type":"application/json"},
+                    json={"expiresIn": 3600}, timeout=30)
+    if r2.status_code != 200:
+        raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
+    data = r2.json()
+    # supabase responde {"signedURL": "/storage/v1/object/sign/..."}
+    signed = data.get("signedURL") or data.get("signedUrl")
+    if not signed:
+        raise HTTPException(500, "No signedURL in Supabase response")
+    # devolver absoluta
+    return f"{SUPABASE_URL}{signed}"
 
 @app.post("/generate")
-async def generate(req: Request):
+def generate(req: GenerateReq):
     try:
-        payload = await req.json()
-    except Exception:
-        raise HTTPException(400, detail="JSON inválido")
-
-    model_slug = _slug(payload.get("model") or payload.get("model_slug") or "")
-    if not model_slug:
-        raise HTTPException(400, detail="Falta 'model'")
-
-    params = normalize(model_slug, payload)
-
-    # --- Generación ---
-    try:
-        if model_slug in ("cable-tray","cable_tray","cable"):
+        if req.model == "cable_tray":
+            params = {
+                "width": float(req.width_mm or 60),
+                "height": float(req.height_mm or 25),
+                "length": float(req.length_mm or 180),
+                "thickness": float(req.thickness_mm or 3),
+                "ventilated": bool(req.ventilated),
+                "holes": [h.model_dump() for h in (req.holes or [])],
+            }
             mesh = make_cable_tray(params)
-            folder, fname = "cable-tray", "cable-tray.stl"
-        elif model_slug in ("vesa-adapter","vesa_adapter","vesa"):
-            mesh = make_vesa_adapter(params)
-            folder, fname = "vesa-adapter", "vesa-adapter.stl"
-        elif model_slug in ("router-mount","router_mount","router"):
+
+        elif req.model == "vesa_adapter":
+            params = {
+                "vesa_mm": float(req.vesa_mm or 100),
+                "thickness": float(req.thickness_mm or 4),
+                "clearance": float(req.clearance_mm or 1),
+                "hole": float(req.hole_diameter_mm or 5),
+            }
+            mesh = make_vesa(params)
+
+        elif req.model == "router_mount":
+            params = {
+                "router_width": float(req.router_width_mm or 120),
+                "router_depth": float(req.router_depth_mm or 80),
+                "thickness": float(req.thickness_mm or 4),
+            }
             mesh = make_router_mount(params)
-            folder, fname = "router-mount", "router-mount.stl"
+
         else:
-            raise HTTPException(400, detail=f"Modelo no soportado: {model_slug}")
+            raise HTTPException(400, "Modelo no soportado")
 
-        # Marca de agua: plaquita + QR discreto
-        lic = payload.get("license_id") or ""
-        qr_url = f"https://teknovashop.com/license/{lic}" if lic else "https://teknovashop.com/forge"
-        mesh = add_watermark_plaque(mesh, qr_url=qr_url, text="TEKNOVASHOP FORGE")
+        # --- EXPORTAR STL (sin 'header' para compatibilidad) ---
+        stl_bytes: bytes = mesh.export(file_type="stl")  # <— FIX: sin header
 
-        # Export binario con header con metadatos
-        meta = {
-            "model": model_slug,
-            "params": params,
-            "ts": datetime.datetime.utcnow().isoformat() + "Z",
-            "license_id": lic,
-            "ver": APP_VERSION,
-        }
-        stl_bytes = mesh.export(file_type="stl", header=_stl_header_meta(meta))
+        fname = f"{req.model}/{uuid.uuid4().hex}.stl"
+        stl_url = upload_to_supabase(fname, stl_bytes)
+
+        return {"status": "ok", "stl_url": stl_url, "model": req.model}
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Error generando STL: {e}")
-
-    # --- Subida + URL firmada corta ---
-    try:
-        signed = storage.upload_stl_and_sign(
-            stl_bytes,
-            filename=fname,
-            model_folder=folder,
-            expires_in=300,  # 5 minutos
-        )
-        return {"status":"ok","stl_url": signed}
-    except Exception as e:
-        raise HTTPException(500, detail=f"Error subiendo a storage: {e}")
+        # Log simple
+        print("ERROR generate:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
