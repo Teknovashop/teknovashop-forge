@@ -37,6 +37,8 @@ class GenerateReq(BaseModel):
     length_mm: Optional[float] = None
     thickness_mm: Optional[float] = None
     ventilated: Optional[bool] = True
+
+    # Agujeros (común a todos los modelos)
     holes: Optional[List[HoleSpec]] = None
 
     # VESA
@@ -47,8 +49,7 @@ class GenerateReq(BaseModel):
     # Router
     router_width_mm: Optional[float] = None
     router_depth_mm: Optional[float] = None
-    strap_slots: Optional[bool] = True
-    hole_diameter_mm: Optional[float] = None
+    strap_slots: Optional[bool] = True  # reservado para futuras ranuras
 
 @app.get("/health")
 def health():
@@ -102,6 +103,7 @@ def generate(req: GenerateReq):
                 "thickness": float(req.thickness_mm or 4),
                 "clearance": float(req.clearance_mm or 1),
                 "hole": float(req.hole_diameter_mm or 5),
+                "holes": [h.model_dump() for h in (req.holes or [])],  # <- soporta agujeros extra
             }
             mesh = make_vesa(params)
 
@@ -110,13 +112,14 @@ def generate(req: GenerateReq):
                 "router_width": float(req.router_width_mm or 120),
                 "router_depth": float(req.router_depth_mm or 80),
                 "thickness": float(req.thickness_mm or 4),
+                "holes": [h.model_dump() for h in (req.holes or [])],  # <- soporta agujeros en base
             }
             mesh = make_router_mount(params)
 
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Export **sin** argumentos extra (evita tu error de `header`)
+        # Export simple (binario STL)
         stl_bytes: bytes = mesh.export(file_type="stl")
 
         fname = f"{req.model}/{uuid.uuid4().hex}.stl"
