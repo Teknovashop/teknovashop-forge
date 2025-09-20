@@ -1,19 +1,14 @@
 # apps/stl-service/models/util.py
-# Utilidades comunes para generar sólidos y taladrar con trimesh
+# Utilidades comunes para generar sólidos y taladrar con trimesh (sin OpenSCAD)
+
 import math
 import numpy as np
 import trimesh as tm
 
-AXIS_TO_VEC = {
-    "x": np.array([1.0, 0.0, 0.0]),
-    "y": np.array([0.0, 1.0, 0.0]),
-    "z": np.array([0.0, 0.0, 1.0]),
-}
-
 def _cyl_transform_at(x: float, y: float, z: float, axis: str):
     """
-    Devuelve matriz 4x4 que orienta un cilindro (por defecto alineado a +Z)
-    al eje indicado y lo coloca en el punto (x,y,z).
+    Matriz 4x4 que orienta un cilindro (por defecto alineado a +Z)
+    al eje indicado y lo coloca en (x,y,z).
     """
     axis = (axis or "y").lower()
     if axis == "z":
@@ -37,9 +32,9 @@ def long_enough(lengths, margin: float = 4.0) -> float:
 
 def drill_holes(mesh: tm.Trimesh, holes: list, bbox_lengths):
     """
-    Resta cilindros a mesh según lista de agujeros con:
+    Resta cilindros a 'mesh' según lista de agujeros con:
       {x_mm, y_mm, z_mm, d_mm, axis}
-    - Si no hay 'y_mm' se asume el centroide en Y del sólido.
+    - Si no hay 'y_mm' se usa el centroide del sólido en Y.
     - 'axis' por defecto: 'y'
     """
     if not holes:
@@ -48,7 +43,7 @@ def drill_holes(mesh: tm.Trimesh, holes: list, bbox_lengths):
     through = long_enough(bbox_lengths, margin=6.0)
     cyls = []
 
-    # Centrar en Y si no viene y_mm
+    # centro en Y por defecto
     cy = float(mesh.bounds[:, 1].mean()) if mesh.bounds.size else 0.0
 
     for h in holes:
@@ -65,11 +60,8 @@ def drill_holes(mesh: tm.Trimesh, holes: list, bbox_lengths):
 
     union_cyl = tm.util.concatenate(cyls) if len(cyls) > 1 else cyls[0]
 
-    # Usa OpenSCAD si está disponible; si no, fallback
-    try:
-        out = mesh.difference(union_cyl, engine="scad")
-    except Exception:
-        out = mesh.difference(union_cyl)
+    # ❌ Nada de engine="scad" – evita dependencia de OpenSCAD
+    out = mesh.difference(union_cyl)
     return out
 
 def box(L: float, H: float, W: float, center=(0.0, 0.0, 0.0)) -> tm.Trimesh:
@@ -84,8 +76,7 @@ def plate(L: float, W: float, T: float, y_bottom: float = 0.0) -> tm.Trimesh:
 def shell_box(L: float, H: float, W: float, wall: float) -> tm.Trimesh:
     """Caja hueca: outer - inner (sin tapa modelada)."""
     outer = box(L, H, W, center=(0.0, H / 2.0, 0.0))
-    inner = box(L - 2 * wall, H - wall, W - 2 * wall, center=(0.0, (H - wall) / 2.0, 0.0))
-    try:
-        return outer.difference(inner, engine="scad")
-    except Exception:
-        return outer.difference(inner)
+    inner = box(L - 2 * wall, H - wall, W - 2 * wall,
+                center=(0.0, (H - wall) / 2.0, 0.0))
+    # ❌ Sin engine="scad"
+    return outer.difference(inner)
