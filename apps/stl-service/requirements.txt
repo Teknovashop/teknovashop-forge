@@ -9,3 +9,7 @@ shapely==2.0.4
 networkx==3.3
 # opcionales; si hay wheel disponible, mejora boolean ops
 manifold3d==3.0.1 ; platform_machine == "x86_64"
+trimesh>=4.4.0
+shapely>=2.0.1
+numpy>=1.26.0
+
