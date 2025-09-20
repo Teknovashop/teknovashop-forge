@@ -1,5 +1,5 @@
 # teknovashop-forge/app.py
-import os, uuid, time
+import os, uuid, time, math
 from typing import List, Literal, Optional
 
 import httpx
@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field
 from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
+
+# nuevos
+from models.phone_stand import make_model as make_phone_stand
+from models.qr_plate import make_model as make_qr_plate
+from models.enclosure_ip65 import make_model as make_enclosure_ip65
+from models.cable_clip import make_model as make_cable_clip
 
 # --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -26,20 +32,28 @@ class HoleSpec(BaseModel):
     z_mm: float
     d_mm: float = Field(gt=0)
 
-ModelKind = Literal["cable_tray", "router_mount", "vesa_adapter"]
+ModelKind = Literal[
+    "cable_tray",
+    "router_mount",
+    "vesa_adapter",
+    "phone_stand",
+    "qr_plate",
+    "enclosure_ip65",
+    "cable_clip",
+]
 
 class GenerateReq(BaseModel):
     model: ModelKind
+
+    # genéricos de placa/soporte
+    holes: Optional[List[HoleSpec]] = None
+    thickness_mm: Optional[float] = None
+    ventilated: Optional[bool] = True
 
     # Cable tray
     width_mm: Optional[float] = None
     height_mm: Optional[float] = None
     length_mm: Optional[float] = None
-    thickness_mm: Optional[float] = None
-    ventilated: Optional[bool] = True
-
-    # Agujeros (común a todos los modelos)
-    holes: Optional[List[HoleSpec]] = None
 
     # VESA
     vesa_mm: Optional[float] = None
@@ -49,7 +63,25 @@ class GenerateReq(BaseModel):
     # Router
     router_width_mm: Optional[float] = None
     router_depth_mm: Optional[float] = None
-    strap_slots: Optional[bool] = True  # reservado para futuras ranuras
+
+    # Phone stand
+    angle_deg: Optional[float] = None
+    support_depth: Optional[float] = None
+    width: Optional[float] = None
+
+    # QR plate
+    slot_mm: Optional[float] = None
+    screw_d_mm: Optional[float] = None
+
+    # Enclosure
+    wall_mm: Optional[float] = None
+    box_length: Optional[float] = None
+    box_width: Optional[float] = None
+    box_height: Optional[float] = None
+
+    # Cable clip
+    clip_diameter: Optional[float] = None
+    clip_width: Optional[float] = None
 
 @app.get("/health")
 def health():
@@ -103,7 +135,7 @@ def generate(req: GenerateReq):
                 "thickness": float(req.thickness_mm or 4),
                 "clearance": float(req.clearance_mm or 1),
                 "hole": float(req.hole_diameter_mm or 5),
-                "holes": [h.model_dump() for h in (req.holes or [])],  # <- soporta agujeros extra
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_vesa(params)
 
@@ -112,14 +144,53 @@ def generate(req: GenerateReq):
                 "router_width": float(req.router_width_mm or 120),
                 "router_depth": float(req.router_depth_mm or 80),
                 "thickness": float(req.thickness_mm or 4),
-                "holes": [h.model_dump() for h in (req.holes or [])],  # <- soporta agujeros en base
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_router_mount(params)
+
+        elif req.model == "phone_stand":
+            params = {
+                "angle_deg": float(req.angle_deg or 60),
+                "support_depth": float(req.support_depth or 110),
+                "width": float(req.width or 80),
+                "thickness": float(req.thickness_mm or 4),
+                # holes: no aplica por defecto
+            }
+            mesh = make_phone_stand(params)
+
+        elif req.model == "qr_plate":
+            params = {
+                "length": float(req.length_mm or 90),
+                "width": float(req.width or 38),
+                "thickness": float(req.thickness_mm or 8),
+                "slot_mm": float(req.slot_mm or 22),
+                "screw_d_mm": float(req.screw_d_mm or 6.5),
+                "holes": [h.model_dump() for h in (req.holes or [])],
+            }
+            mesh = make_qr_plate(params)
+
+        elif req.model == "enclosure_ip65":
+            params = {
+                "length": float(req.box_length or req.length_mm or 201),
+                "width": float(req.box_width or req.width or 68),
+                "height": float(req.box_height or req.height_mm or 31),
+                "wall": float(req.wall_mm or req.thickness_mm or 5),
+                "holes": [h.model_dump() for h in (req.holes or [])],
+            }
+            mesh = make_enclosure_ip65(params)
+
+        elif req.model == "cable_clip":
+            params = {
+                "diameter": float(req.clip_diameter or 8),
+                "width": float(req.clip_width or 12),
+                "thickness": float(req.thickness_mm or 2.4),
+            }
+            mesh = make_cable_clip(params)
 
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Export simple (binario STL)
+        # Export STL binario
         stl_bytes: bytes = mesh.export(file_type="stl")
 
         fname = f"{req.model}/{uuid.uuid4().hex}.stl"
