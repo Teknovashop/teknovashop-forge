@@ -1,6 +1,6 @@
 # teknovashop-forge/app.py
 import os, uuid, time
-from typing import List, Literal, Optional, Tuple
+from typing import List, Literal, Optional, Tuple, Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -9,8 +9,6 @@ from pydantic import BaseModel, Field
 from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
-
-# nuevos
 from models.phone_stand import make_model as make_phone_stand
 from models.qr_plate import make_model as make_qr_plate
 from models.enclosure_ip65 import make_model as make_enclosure_ip65
@@ -31,7 +29,7 @@ class HoleSpec(BaseModel):
     x_mm: float
     z_mm: float
     d_mm: float = Field(gt=0)
-    # campos extra que puede enviar el front (los ignoramos en backend básico)
+    # extras que puede mandar el front (se ignoran para makers antiguos)
     y_mm: Optional[float] = None
     nx: Optional[float] = None
     ny: Optional[float] = None
@@ -93,17 +91,44 @@ def health():
     return {"ok": True, "ts": int(time.time())}
 
 # ---------- helpers ----------
-def holes_as_tuples(holes: Optional[List[HoleSpec]]) -> List[Tuple[float, float, float]]:
-    """Compatibiliza con makers antiguos: [(x,z,d), ...]"""
-    if not holes:
-        return []
-    return [(float(h.x_mm), float(h.z_mm), float(h.d_mm)) for h in holes]  # <-- CLAVE
+def _as_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
+def holes_canonize(holes_any: Optional[Any]) -> List[Tuple[float, float, float]]:
+    """
+    Acepta:
+      - None
+      - List[HoleSpec] (pydantic)
+      - List[dict] con claves x_mm/z_mm/d_mm o x/z/d
+      - List[tuple|list] de 3 números
+    Devuelve: List[(x,z,d)]
+    """
+    res: List[Tuple[float, float, float]] = []
+    if not holes_any:
+        return res
+    for h in holes_any:
+        # HoleSpec -> dict
+        if hasattr(h, "model_dump"):
+            h = h.model_dump()
+        if isinstance(h, dict):
+            x = h.get("x_mm", h.get("x"))
+            z = h.get("z_mm", h.get("z"))
+            d = h.get("d_mm", h.get("d") or h.get("diameter"))
+            res.append((_as_float(x), _as_float(z), _as_float(d)))
+        elif isinstance(h, (list, tuple)) and len(h) >= 3:
+            res.append((_as_float(h[0]), _as_float(h[1]), _as_float(h[2])))
+        else:
+            # ignora silenciosamente formatos desconocidos
+            continue
+    return res
 
 def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(500, "Supabase no configurado")
 
-    # path SIEMPRE relativo al bucket, sin barra inicial
     path = path.lstrip("/")
     put_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
@@ -136,87 +161,85 @@ def generate(req: GenerateReq):
     try:
         if req.model == "cable_tray":
             params = {
-                "width": float(req.width_mm or 60),
-                "height": float(req.height_mm or 25),
-                "length": float(req.length_mm or 180),
-                "thickness": float(req.thickness_mm or 3),
+                "width": _as_float(req.width_mm or 60),
+                "height": _as_float(req.height_mm or 25),
+                "length": _as_float(req.length_mm or 180),
+                "thickness": _as_float(req.thickness_mm or 3),
                 "ventilated": bool(req.ventilated),
-                "holes": holes_as_tuples(req.holes),  # <-- CLAVE
+                "holes": holes_canonize(req.holes),
             }
             mesh = make_cable_tray(params)
 
         elif req.model == "vesa_adapter":
             params = {
-                "vesa_mm": float(req.vesa_mm or 100),
-                "thickness": float(req.thickness_mm or 4),
-                "clearance": float(req.clearance_mm or 1),
-                "hole": float(req.hole_diameter_mm or 5),
-                "holes": holes_as_tuples(req.holes),  # <-- CLAVE
+                "vesa_mm": _as_float(req.vesa_mm or 100),
+                "thickness": _as_float(req.thickness_mm or 4),
+                "clearance": _as_float(req.clearance_mm or 1),
+                "hole": _as_float(req.hole_diameter_mm or 5),
+                "holes": holes_canonize(req.holes),
             }
             mesh = make_vesa(params)
 
         elif req.model == "router_mount":
             params = {
-                "router_width": float(req.router_width_mm or 120),
-                "router_depth": float(req.router_depth_mm or 80),
-                "thickness": float(req.thickness_mm or 4),
-                "holes": holes_as_tuples(req.holes),  # <-- CLAVE
+                "router_width": _as_float(req.router_width_mm or 120),
+                "router_depth": _as_float(req.router_depth_mm or 80),
+                "thickness": _as_float(req.thickness_mm or 4),
+                "holes": holes_canonize(req.holes),
             }
             mesh = make_router_mount(params)
 
         elif req.model == "phone_stand":
-            # Compat: hay makers que usan angle o tilt; enviamos ambas si procede.
-            angle_val = float(req.angle_deg or 60)
+            angle_val = _as_float(req.angle_deg or 60)
+            depth_val = _as_float(req.support_depth or 110)
             params = {
                 "angle_deg": angle_val,
-                "angle": angle_val,  # compat
-                "support_depth": float(req.support_depth or 110),
-                "depth": float(req.support_depth or 110),  # compat
-                "width": float(req.width or 80),
-                "thickness": float(req.thickness_mm or 4),
+                "angle": angle_val,            # compat
+                "support_depth": depth_val,
+                "depth": depth_val,            # compat
+                "width": _as_float(req.width or 80),
+                "thickness": _as_float(req.thickness_mm or 4),
             }
             mesh = make_phone_stand(params)
 
         elif req.model == "qr_plate":
             params = {
-                "length": float(req.length_mm or 90),
-                "width": float(req.width or 38),
-                "thickness": float(req.thickness_mm or 8),
-                "slot_mm": float(req.slot_mm or 22),
-                "screw_d_mm": float(req.screw_d_mm or 6.5),
-                "holes": holes_as_tuples(req.holes),  # <-- CLAVE
+                "length": _as_float(req.length_mm or 90),
+                "width": _as_float(req.width or 38),
+                "thickness": _as_float(req.thickness_mm or 8),
+                "slot_mm": _as_float(req.slot_mm or 22),
+                "screw_d_mm": _as_float(req.screw_d_mm or 6.5),
+                "holes": holes_canonize(req.holes),
             }
             mesh = make_qr_plate(params)
 
         elif req.model == "enclosure_ip65":
             params = {
-                "length": float(req.box_length or req.length_mm or 201),
-                "width": float(req.box_width or req.width or 68),
-                "height": float(req.box_height or req.height_mm or 31),
-                "wall": float(req.wall_mm or req.thickness_mm or 5),
-                "holes": holes_as_tuples(req.holes),  # <-- CLAVE
+                "length": _as_float(req.box_length or req.length_mm or 201),
+                "width": _as_float(req.box_width or req.width or 68),
+                "height": _as_float(req.box_height or req.height_mm or 31),
+                "wall": _as_float(req.wall_mm or req.thickness_mm or 5),
+                "holes": holes_canonize(req.holes),
             }
             mesh = make_enclosure_ip65(params)
 
         elif req.model == "cable_clip":
             params = {
-                "diameter": float(req.clip_diameter or 8),
-                "width": float(req.clip_width or 12),
-                "thickness": float(req.thickness_mm or 2.4),
+                "diameter": _as_float(req.clip_diameter or 8),
+                "width": _as_float(req.clip_width or 12),
+                "thickness": _as_float(req.thickness_mm or 2.4),
             }
             mesh = make_cable_clip(params)
 
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Export STL binario
         stl_bytes: bytes = mesh.export(file_type="stl")
         if not stl_bytes:
             raise HTTPException(500, "STL vacío")
 
         fname = f"{req.model}/{uuid.uuid4().hex}.stl"
         stl_url = upload_to_supabase(fname, stl_bytes)
-
         return {"status": "ok", "stl_url": stl_url, "model": req.model}
 
     except HTTPException:
