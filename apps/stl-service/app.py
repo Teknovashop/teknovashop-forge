@@ -1,11 +1,12 @@
 # teknovashop-forge/app.py
 import os, uuid, time
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple, Dict, Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+# --------- MODELOS ---------
 from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
@@ -22,16 +23,17 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[WARN] Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY")
+if not SUPABASE_BUCKET:
+    print("[WARN] Falta SUPABASE_BUCKET; usando 'forge-stl' por defecto")
 
 # --------- APP ---------
 app = FastAPI(title="Teknovashop Forge")
 
-# --------- MODELOS/SCHEMAS ---------
+# --------- SCHEMAS ---------
 class HoleSpec(BaseModel):
     x_mm: float
     z_mm: float
     d_mm: float = Field(gt=0)
-    # campos opcionales (por si el front los manda)
     y_mm: Optional[float] = None
     nx: Optional[float] = None
     ny: Optional[float] = None
@@ -51,7 +53,7 @@ ModelKind = Literal[
 class GenerateReq(BaseModel):
     model: ModelKind
 
-    # genéricos de placa/soporte
+    # genéricos
     holes: Optional[List[HoleSpec]] = None
     thickness_mm: Optional[float] = None
     ventilated: Optional[bool] = True
@@ -78,6 +80,8 @@ class GenerateReq(BaseModel):
     # QR plate
     slot_mm: Optional[float] = None
     screw_d_mm: Optional[float] = None
+    length_mm_qr: Optional[float] = None
+    width_mm_qr: Optional[float] = None
 
     # Enclosure
     wall_mm: Optional[float] = None
@@ -95,26 +99,54 @@ def health():
     return {"ok": True, "ts": int(time.time())}
 
 
-def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
+# ---------- Helpers ----------
+def normalize_holes(holes_in: Optional[List[HoleSpec]]) -> Dict[str, Any]:
     """
-    Sube a Supabase Storage y devuelve Signed URL absoluto.
-    IMPORTANTE: 'path' NO debe empezar con '/', y debe incluir carpeta si procede.
+    Devuelve tres variantes compatibles:
+      - holes_legacy: List[Tuple[x, z, d]]
+      - holes:       List[Dict{x,z,d}]
+      - holes_xyz:   List[Dict{x,y,z,d,nx,ny,nz,axis}]
+    Todas las magnitudes ya en mm (floats).
     """
-    if path.startswith("/"):
-        path = path.lstrip("/")
+    holes_legacy: List[Tuple[float, float, float]] = []
+    holes_list: List[Dict[str, float]] = []
+    holes_xyz: List[Dict[str, float]] = []
 
-    # 1) PUT objeto
-    put_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
+    for h in holes_in or []:
+        # Pydantic model -> dict
+        d = h.model_dump()
+        x = float(d.get("x_mm", 0.0))
+        z = float(d.get("z_mm", 0.0))
+        y = float(d.get("y_mm", 0.0) or 0.0)
+        dia = float(d.get("d_mm", 0.0))
+        nx = float(d.get("nx", 0.0) or 0.0)
+        ny = float(d.get("ny", 0.0) or 1.0)  # por defecto vertical
+        nz = float(d.get("nz", 0.0) or 0.0)
+        axis = d.get("axis", "auto") or "auto"
+
+        holes_legacy.append((x, z, dia))
+        holes_list.append({"x": x, "z": z, "d": dia})
+        holes_xyz.append({"x": x, "y": y, "z": z, "d": dia, "nx": nx, "ny": ny, "nz": nz, "axis": axis})
+
+    return {
+        "holes_legacy": holes_legacy,
+        "holes": holes_list,
+        "holes_xyz": holes_xyz,
+    }
+
+
+def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
+    """Sube a Supabase Storage y devuelve Signed URL absoluto."""
+    up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": content_type,
         "X-Upsert": "true",
     }
-    r = httpx.put(put_url, headers=headers, content=content, timeout=60)
+    r = httpx.put(up_url, headers=headers, content=content, timeout=60)
     if r.status_code not in (200, 201):
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-    # 2) Generar signed URL (absoluta)
     sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
     r2 = httpx.post(
         sign_url,
@@ -132,25 +164,12 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
     return f"{SUPABASE_URL}{signed}"
 
 
+# ---------- Endpoint principal ----------
 @app.post("/generate")
 def generate(req: GenerateReq):
-    """
-    Genera el STL en memoria y lo sube a Supabase, devolviendo un signed URL.
-    Requiere que el contenedor tenga disponible un motor de triangulación:
-    instalamos 'mapbox-earcut' en requirements para evitar fallos.
-    """
     try:
-        # Normaliza agujeros a dicts simples (x,z,d)
-        holes = []
-        for h in (req.holes or []):
-            d = h.model_dump()
-            holes.append({
-                "x_mm": float(d.get("x_mm", 0.0)),
-                "z_mm": float(d.get("z_mm", 0.0)),
-                "d_mm": float(d.get("d_mm", 0.0)),
-            })
+        holes_norm = normalize_holes(req.holes)
 
-        # Enrutado por modelo
         if req.model == "cable_tray":
             params = {
                 "width": float(req.width_mm or 60),
@@ -158,7 +177,10 @@ def generate(req: GenerateReq):
                 "length": float(req.length_mm or 180),
                 "thickness": float(req.thickness_mm or 3),
                 "ventilated": bool(req.ventilated),
-                "holes": holes,
+                # compatibilidad máxima
+                "holes": holes_norm["holes"],
+                "holes_legacy": holes_norm["holes_legacy"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_cable_tray(params)
 
@@ -168,7 +190,10 @@ def generate(req: GenerateReq):
                 "thickness": float(req.thickness_mm or 4),
                 "clearance": float(req.clearance_mm or 1),
                 "hole": float(req.hole_diameter_mm or 5),
-                "holes": holes,
+                "ventilated": bool(req.ventilated),
+                "holes": holes_norm["holes"],
+                "holes_legacy": holes_norm["holes_legacy"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_vesa(params)
 
@@ -177,28 +202,36 @@ def generate(req: GenerateReq):
                 "router_width": float(req.router_width_mm or 120),
                 "router_depth": float(req.router_depth_mm or 80),
                 "thickness": float(req.thickness_mm or 4),
-                "holes": holes,
+                "ventilated": bool(req.ventilated),
+                "holes": holes_norm["holes"],
+                "holes_legacy": holes_norm["holes_legacy"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_router_mount(params)
 
         elif req.model == "phone_stand":
-            # La implementación espera 'angle' (no 'angle_deg')
             params = {
-                "angle": float(req.angle_deg or 60),         # <-- clave corregida
+                "angle_deg": float(req.angle_deg or 60),
                 "support_depth": float(req.support_depth or 110),
                 "width": float(req.width or 80),
                 "thickness": float(req.thickness_mm or 4),
+                # este modelo normalmente no usa agujeros, pero los pasamos por si procede
+                "holes": holes_norm["holes"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_phone_stand(params)
 
         elif req.model == "qr_plate":
             params = {
-                "length": float(req.length_mm or 90),
-                "width": float(req.width or 38),
+                "length": float(req.length_mm_qr or req.length_mm or 90),
+                "width": float(req.width_mm_qr or req.width or 38),
                 "thickness": float(req.thickness_mm or 8),
                 "slot_mm": float(req.slot_mm or 22),
                 "screw_d_mm": float(req.screw_d_mm or 6.5),
-                "holes": holes,
+                "ventilated": bool(req.ventilated),
+                "holes": holes_norm["holes"],
+                "holes_legacy": holes_norm["holes_legacy"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_qr_plate(params)
 
@@ -208,7 +241,10 @@ def generate(req: GenerateReq):
                 "width": float(req.box_width or req.width or 68),
                 "height": float(req.box_height or req.height_mm or 31),
                 "wall": float(req.wall_mm or req.thickness_mm or 5),
-                "holes": holes,
+                "ventilated": bool(req.ventilated),
+                "holes": holes_norm["holes"],
+                "holes_legacy": holes_norm["holes_legacy"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_enclosure_ip65(params)
 
@@ -217,13 +253,16 @@ def generate(req: GenerateReq):
                 "diameter": float(req.clip_diameter or 8),
                 "width": float(req.clip_width or 12),
                 "thickness": float(req.thickness_mm or 2.4),
+                "holes": holes_norm["holes"],
+                "holes_xyz": holes_norm["holes_xyz"],
             }
             mesh = make_cable_clip(params)
 
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Export STL binario
+        # Export STL binario (Trimesh >=4.4.x)
+        # No pasamos kwargs exóticos para evitar fallos de cabecera
         stl_bytes: bytes = mesh.export(file_type="stl")
 
         fname = f"{req.model}/{uuid.uuid4().hex}.stl"
@@ -232,7 +271,9 @@ def generate(req: GenerateReq):
         return {"status": "ok", "stl_url": stl_url, "model": req.model}
 
     except HTTPException:
+        # Re-levanta HTTPException tal cual
         raise
     except Exception as e:
+        # Log visible en Render
         print("ERROR generate:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
