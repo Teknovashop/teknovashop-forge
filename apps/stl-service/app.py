@@ -1,22 +1,21 @@
 # teknovashop-forge/app.py
-import os, uuid, time, math
+import os, uuid, time
 from typing import List, Literal, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from urllib.parse import quote
 
-# modelos existentes
+# ----- MODELOS EXISTENTES -----
 from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
-
-# nuevos
+# ----- NUEVOS MODELOS -----
 from models.phone_stand import make_model as make_phone_stand
 from models.qr_plate import make_model as make_qr_plate
 from models.enclosure_ip65 import make_model as make_enclosure_ip65
 from models.cable_clip import make_model as make_cable_clip
-
 
 # --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -25,25 +24,20 @@ SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[WARN] Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY")
 
-
 # --------- APP ---------
 app = FastAPI(title="Teknovashop Forge")
 
-
 # --------- MODELOS/SCHEMAS ---------
 class HoleSpec(BaseModel):
-    # centro del agujero en milímetros (sistema de escena)
     x_mm: float
     z_mm: float
-    y_mm: Optional[float] = None  # nuevo: altura exacta del pick
     d_mm: float = Field(gt=0)
-    # orientación: si no viene o es "auto", se calcula con la normal
-    axis: Optional[Literal["auto", "x", "y", "z"]] = "auto"
-    # normal de la cara pickeada (opcional pero útil)
+    # opcionalmente, si vienes del visor con normales/eje:
+    y_mm: Optional[float] = None
     nx: Optional[float] = None
     ny: Optional[float] = None
     nz: Optional[float] = None
-
+    axis: Optional[Literal["auto","x","y","z"]] = "auto"
 
 ModelKind = Literal[
     "cable_tray",
@@ -54,7 +48,6 @@ ModelKind = Literal[
     "enclosure_ip65",
     "cable_clip",
 ]
-
 
 class GenerateReq(BaseModel):
     model: ModelKind
@@ -103,79 +96,82 @@ def health():
     return {"ok": True, "ts": int(time.time())}
 
 
-# --------- HELPERS ---------
-def _auto_axis_from_normal(nx: Optional[float], ny: Optional[float], nz: Optional[float]) -> str:
+def _norm_path(p: str) -> str:
+    """Asegura que no hay / inicial, ni //, etc."""
+    p = p.strip().lstrip("/")
+    while "//" in p:
+        p = p.replace("//", "/")
+    return p
+
+
+def upload_to_supabase(path: str, content: bytes, *, download_name: Optional[str] = None) -> str:
     """
-    Decide el eje del taladro según la normal:
-    - |ny| máximo  -> 'y'
-    - |nx| máximo  -> 'x'
-    - |nz| máximo  -> 'z'
-    Si no hay normal válida, por defecto 'y'.
+    Sube a Supabase Storage y devuelve Signed URL absoluta, con &download=<file>.
+    Usa el endpoint moderno de firma; si no está disponible, hace fallback al antiguo.
     """
-    comps = [
-        ("x", abs(nx) if nx is not None else -1.0),
-        ("y", abs(ny) if ny is not None else -1.0),
-        ("z", abs(nz) if nz is not None else -1.0),
-    ]
-    # si ninguna tiene valor >=0, devolvemos y
-    if max(c for _, c in comps) < 0:
-        return "y"
-    comps.sort(key=lambda p: p[1], reverse=True)
-    return comps[0][0]
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(500, "Supabase no configurado")
 
+    path = _norm_path(path)
+    if not download_name:
+        download_name = path.split("/")[-1] or "file.stl"
 
-def _hole_to_dict(h: HoleSpec) -> dict:
-    axis = h.axis or "auto"
-    if axis == "auto":
-        axis = _auto_axis_from_normal(h.nx, h.ny, h.nz)
-    return {
-        "x_mm": float(h.x_mm),
-        "y_mm": float(h.y_mm if h.y_mm is not None else 0.0),
-        "z_mm": float(h.z_mm),
-        "d_mm": float(h.d_mm),
-        "axis": axis,      # 'x' | 'y' | 'z'
-        "nx": h.nx,
-        "ny": h.ny,
-        "nz": h.nz,
-    }
-
-
-def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
-    """Sube a Supabase Storage y devuelve Signed URL absoluto."""
-    up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
+    # 1) Upload (PUT)
+    up_url = f"{SUPABASE_URL}/storage/v1/object/{quote(SUPABASE_BUCKET)}/{quote(path)}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": content_type,
+        "Content-Type": "application/sla",  # STL binario
         "X-Upsert": "true",
     }
-    r = httpx.put(up_url, headers=headers, content=content, timeout=30)
+    r = httpx.put(up_url, headers=headers, content=content, timeout=60)
     if r.status_code not in (200, 201):
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-    sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
+    # 2) Try modern sign endpoint (multiple paths)
+    sign_modern = f"{SUPABASE_URL}/storage/v1/object/sign/{quote(SUPABASE_BUCKET)}"
+    payload = {"paths": [{"path": path, "expiresIn": 3600}]}
     r2 = httpx.post(
-        sign_url,
+        sign_modern,
         headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
-        json={"expiresIn": 3600},
+        json=payload,
         timeout=30,
     )
-    if r2.status_code != 200:
-        raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
 
-    data = r2.json()
-    signed = data.get("signedURL") or data.get("signedUrl")
-    if not signed:
-        raise HTTPException(500, "No signedURL in Supabase response")
-    return f"{SUPABASE_URL}{signed}"
+    signed_url: Optional[str] = None
+    if r2.status_code == 200:
+        data = r2.json() or {}
+        arr = data.get("signedUrls") or data.get("signedURLs") or []
+        if isinstance(arr, list) and len(arr) > 0 and isinstance(arr[0], str):
+            signed_url = arr[0]
+
+    # 3) Fallback: legacy sign endpoint (single path in URL)
+    if not signed_url:
+        legacy = f"{SUPABASE_URL}/storage/v1/object/sign/{quote(SUPABASE_BUCKET)}/{quote(path)}"
+        r3 = httpx.post(
+            legacy,
+            headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+            json={"expiresIn": 3600},
+            timeout=30,
+        )
+        if r3.status_code != 200:
+            raise HTTPException(500, f"Supabase sign error: {r3.status_code} {r3.text}")
+        data = r3.json()
+        signed_url = data.get("signedURL") or data.get("signedUrl")
+        if not signed_url:
+            raise HTTPException(500, "No signedURL in Supabase response")
+
+    # 4) Asegurar URL absoluta y añadir download=
+    if signed_url.startswith("/"):
+        signed_url = f"{SUPABASE_URL}{signed_url}"
+    # Sugerir descarga con nombre de fichero
+    sep = "&" if "?" in signed_url else "?"
+    signed_url = f"{signed_url}{sep}download={quote(download_name)}"
+    return signed_url
 
 
-# --------- ENDPOINT PRINCIPAL ---------
 @app.post("/generate")
 def generate(req: GenerateReq):
     try:
-        # Normaliza agujeros una vez aquí
-        norm_holes = [_hole_to_dict(h) for h in (req.holes or [])]
-
         if req.model == "cable_tray":
             params = {
                 "width": float(req.width_mm or 60),
@@ -183,7 +179,7 @@ def generate(req: GenerateReq):
                 "length": float(req.length_mm or 180),
                 "thickness": float(req.thickness_mm or 3),
                 "ventilated": bool(req.ventilated),
-                "holes": norm_holes,
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_cable_tray(params)
 
@@ -193,7 +189,7 @@ def generate(req: GenerateReq):
                 "thickness": float(req.thickness_mm or 4),
                 "clearance": float(req.clearance_mm or 1),
                 "hole": float(req.hole_diameter_mm or 5),
-                "holes": norm_holes,
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_vesa(params)
 
@@ -202,7 +198,7 @@ def generate(req: GenerateReq):
                 "router_width": float(req.router_width_mm or 120),
                 "router_depth": float(req.router_depth_mm or 80),
                 "thickness": float(req.thickness_mm or 4),
-                "holes": norm_holes,
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_router_mount(params)
 
@@ -212,7 +208,6 @@ def generate(req: GenerateReq):
                 "support_depth": float(req.support_depth or 110),
                 "width": float(req.width or 80),
                 "thickness": float(req.thickness_mm or 4),
-                # sin holes por defecto (base inclinada, no perforamos)
             }
             mesh = make_phone_stand(params)
 
@@ -223,7 +218,7 @@ def generate(req: GenerateReq):
                 "thickness": float(req.thickness_mm or 8),
                 "slot_mm": float(req.slot_mm or 22),
                 "screw_d_mm": float(req.screw_d_mm or 6.5),
-                "holes": norm_holes,
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_qr_plate(params)
 
@@ -233,7 +228,7 @@ def generate(req: GenerateReq):
                 "width": float(req.box_width or req.width or 68),
                 "height": float(req.box_height or req.height_mm or 31),
                 "wall": float(req.wall_mm or req.thickness_mm or 5),
-                "holes": norm_holes,
+                "holes": [h.model_dump() for h in (req.holes or [])],
             }
             mesh = make_enclosure_ip65(params)
 
@@ -242,7 +237,6 @@ def generate(req: GenerateReq):
                 "diameter": float(req.clip_diameter or 8),
                 "width": float(req.clip_width or 12),
                 "thickness": float(req.thickness_mm or 2.4),
-                # normalmente sin holes
             }
             mesh = make_cable_clip(params)
 
@@ -252,8 +246,11 @@ def generate(req: GenerateReq):
         # Export STL binario
         stl_bytes: bytes = mesh.export(file_type="stl")
 
-        fname = f"{req.model}/{uuid.uuid4().hex}.stl"
-        stl_url = upload_to_supabase(fname, stl_bytes)
+        # nombre consistente por modelo
+        filename = f"{req.model}/{uuid.uuid4().hex}.stl"
+        download_name = f"{req.model}.stl"
+
+        stl_url = upload_to_supabase(filename, stl_bytes, download_name=download_name)
 
         return {"status": "ok", "stl_url": stl_url, "model": req.model}
 
