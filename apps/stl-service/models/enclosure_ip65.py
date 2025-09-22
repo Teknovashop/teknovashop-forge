@@ -1,23 +1,59 @@
 # apps/stl-service/models/enclosure_ip65.py
-import trimesh as tm
+from typing import Dict, Any, Iterable, List, Tuple
+import trimesh
+from .utils_geo import plate_with_holes, rectangle_plate, concatenate
 
-def make_model(p: dict) -> tm.Trimesh:
-    L = float(p.get("length", 201))
-    W = float(p.get("width", 68))
-    H = float(p.get("height", 31))
-    wall = float(p.get("wall", 5))
-    holes = p.get("holes") or []
+def make_model(
+    length: float = 201.0,
+    width: float = 68.0,
+    height: float = 31.0,
+    wall: float = 5.0,
+    grill: float = 16.0,
+    ventilated: bool = True,
+    holes: Iterable[Dict[str, float]] = (),
+) -> trimesh.Trimesh:
+    """
+    Caja “IP65-like”: no hacemos boolean de caja hueca, sino paredes + tapa como placas.
+    - Base (suelo)
+    - Paredes: 4 placas
+    - Tapa: 1 placa (se puede imprimir aparte si quieres más tarde)
+    """
+    # base
+    base = plate_with_holes(L=length, W=width, T=wall,
+                            holes=[(h["x_mm"], h["z_mm"], h["d_mm"]) for h in holes])
 
-    outer = tm.creation.box((L, H, W)); outer.apply_translation((L/2, H/2, W/2))
-    inner = tm.creation.box((max(1, L-2*wall), max(1, H-2*wall), max(1, W-2*wall)))
-    inner.apply_translation((L/2, H/2, W/2))
-    body = outer.difference(inner, engine="scad" if tm.interfaces.solid.is_available() else None)
+    # rejillas en paredes largas si ventilated
+    side_holes: List[Tuple[float, float, float]] = []
+    if ventilated:
+        pitch = 12.0
+        d = 5.0
+        y_rows = [height * 0.3, height * 0.6]
+        xs = [x for x in [i for i in range(-int(length//2), int(length//2)+1, int(pitch))]]
+        for y in y_rows:
+            for x in xs:
+                side_holes.append((float(x), float(y), d))
 
-    # pasantes
-    for h in holes:
-        d = float(h.get("d_mm", 5)); x = float(h.get("x_mm", 0)); z = float(h.get("z_mm", 0))
-        c = tm.creation.cylinder(radius=max(0.1, d/2), height=H*3, sections=32)
-        c.apply_translation((x+L/2, H*1.5, z+W/2))
-        body = body.difference(c, engine="scad" if tm.interfaces.solid.is_available() else None)
+    # paredes largas (X=length) colocadas a ±width/2
+    long1 = rectangle_plate(L=length, H=height, T=wall, holes=side_holes).copy()
+    long2 = rectangle_plate(L=length, H=height, T=wall, holes=side_holes).copy()
+    long1.apply_translation((0, height/2.0, +width/2.0))
+    long2.apply_translation((0, height/2.0, -width/2.0))
 
-    return body
+    # paredes cortas (Z=width) sin rejilla (o podrías añadir otra)
+    short1 = rectangle_plate(L=width, H=height, T=wall, holes=[]).copy()
+    short2 = rectangle_plate(L=width, H=height, T=wall, holes=[]).copy()
+    # rotar 90º para que “length” de placa sea width y alinearlas
+    short1.apply_rotation(trimesh.transformations.rotation_matrix(
+        angle=1.57079632679, direction=(0,1,0), point=(0,0,0)
+    ))
+    short2.apply_rotation(trimesh.transformations.rotation_matrix(
+        angle=1.57079632679, direction=(0,1,0), point=(0,0,0)
+    ))
+    short1.apply_translation((+length/2.0, height/2.0, 0))
+    short2.apply_translation((-length/2.0, height/2.0, 0))
+
+    # tapa (misma placa que base), la elevamos a Y=height+wall
+    lid = plate_with_holes(L=length, W=width, T=wall, holes=[])
+    lid.apply_translation((0, height, 0))
+
+    return concatenate([base, long1, long2, short1, short2, lid])
