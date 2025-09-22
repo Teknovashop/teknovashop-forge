@@ -5,13 +5,12 @@ from typing import List, Literal, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from urllib.parse import quote
 
-# ----- MODELOS EXISTENTES -----
 from models.cable_tray import make_model as make_cable_tray
 from models.router_mount import make_model as make_router_mount
 from models.vesa_adapter import make_model as make_vesa
-# ----- NUEVOS MODELOS -----
+
+# nuevos
 from models.phone_stand import make_model as make_phone_stand
 from models.qr_plate import make_model as make_qr_plate
 from models.enclosure_ip65 import make_model as make_enclosure_ip65
@@ -32,12 +31,12 @@ class HoleSpec(BaseModel):
     x_mm: float
     z_mm: float
     d_mm: float = Field(gt=0)
-    # opcionalmente, si vienes del visor con normales/eje:
+    # opcionalmente aceptamos y_mm y normales si el front los envía
     y_mm: Optional[float] = None
     nx: Optional[float] = None
     ny: Optional[float] = None
     nz: Optional[float] = None
-    axis: Optional[Literal["auto","x","y","z"]] = "auto"
+    axis: Optional[Literal["auto", "x", "y", "z"]] = "auto"
 
 ModelKind = Literal[
     "cable_tray",
@@ -96,77 +95,59 @@ def health():
     return {"ok": True, "ts": int(time.time())}
 
 
-def _norm_path(p: str) -> str:
-    """Asegura que no hay / inicial, ni //, etc."""
-    p = p.strip().lstrip("/")
-    while "//" in p:
-        p = p.replace("//", "/")
-    return p
-
-
-def upload_to_supabase(path: str, content: bytes, *, download_name: Optional[str] = None) -> str:
+def _normalize_signed_url(signed: str) -> str:
     """
-    Sube a Supabase Storage y devuelve Signed URL absoluta, con &download=<file>.
-    Usa el endpoint moderno de firma; si no está disponible, hace fallback al antiguo.
+    Supabase puede devolver:
+      - URL absoluta: https://.../storage/v1/object/sign/...
+      - Ruta con /storage/v1/object/sign/...
+      - Ruta con /object/sign/...
+    Normalizamos a absoluta siempre.
     """
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise HTTPException(500, "Supabase no configurado")
+    if signed.startswith("http://") or signed.startswith("https://"):
+        return signed
 
-    path = _norm_path(path)
-    if not download_name:
-        download_name = path.split("/")[-1] or "file.stl"
+    # asegurar que empieza por /
+    if not signed.startswith("/"):
+        signed = "/" + signed
 
-    # 1) Upload (PUT)
-    up_url = f"{SUPABASE_URL}/storage/v1/object/{quote(SUPABASE_BUCKET)}/{quote(path)}"
+    # si falta el prefijo /storage/v1, lo añadimos
+    if not signed.startswith("/storage/v1"):
+        signed = "/storage/v1" + signed
+
+    return f"{SUPABASE_URL}{signed}"
+
+
+def upload_to_supabase(path: str, content: bytes, content_type="application/octet-stream") -> str:
+    """Sube a Supabase Storage y devuelve Signed URL absoluto."""
+    # path NO debe empezar por '/'
+    path = path.lstrip("/")
+
+    up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/sla",  # STL binario
+        "Content-Type": content_type,
         "X-Upsert": "true",
     }
-    r = httpx.put(up_url, headers=headers, content=content, timeout=60)
+    r = httpx.put(up_url, headers=headers, content=content, timeout=60.0)
     if r.status_code not in (200, 201):
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-    # 2) Try modern sign endpoint (multiple paths)
-    sign_modern = f"{SUPABASE_URL}/storage/v1/object/sign/{quote(SUPABASE_BUCKET)}"
-    payload = {"paths": [{"path": path, "expiresIn": 3600}]}
+    sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
     r2 = httpx.post(
-        sign_modern,
+        sign_url,
         headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=30,
+        json={"expiresIn": 3600},
+        timeout=30.0,
     )
+    if r2.status_code != 200:
+        raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
 
-    signed_url: Optional[str] = None
-    if r2.status_code == 200:
-        data = r2.json() or {}
-        arr = data.get("signedUrls") or data.get("signedURLs") or []
-        if isinstance(arr, list) and len(arr) > 0 and isinstance(arr[0], str):
-            signed_url = arr[0]
+    data = r2.json()
+    signed = data.get("signedURL") or data.get("signedUrl")
+    if not signed:
+        raise HTTPException(500, "No signedURL in Supabase response")
 
-    # 3) Fallback: legacy sign endpoint (single path in URL)
-    if not signed_url:
-        legacy = f"{SUPABASE_URL}/storage/v1/object/sign/{quote(SUPABASE_BUCKET)}/{quote(path)}"
-        r3 = httpx.post(
-            legacy,
-            headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
-            json={"expiresIn": 3600},
-            timeout=30,
-        )
-        if r3.status_code != 200:
-            raise HTTPException(500, f"Supabase sign error: {r3.status_code} {r3.text}")
-        data = r3.json()
-        signed_url = data.get("signedURL") or data.get("signedUrl")
-        if not signed_url:
-            raise HTTPException(500, "No signedURL in Supabase response")
-
-    # 4) Asegurar URL absoluta y añadir download=
-    if signed_url.startswith("/"):
-        signed_url = f"{SUPABASE_URL}{signed_url}"
-    # Sugerir descarga con nombre de fichero
-    sep = "&" if "?" in signed_url else "?"
-    signed_url = f"{signed_url}{sep}download={quote(download_name)}"
-    return signed_url
+    return _normalize_signed_url(signed)
 
 
 @app.post("/generate")
@@ -246,11 +227,8 @@ def generate(req: GenerateReq):
         # Export STL binario
         stl_bytes: bytes = mesh.export(file_type="stl")
 
-        # nombre consistente por modelo
-        filename = f"{req.model}/{uuid.uuid4().hex}.stl"
-        download_name = f"{req.model}.stl"
-
-        stl_url = upload_to_supabase(filename, stl_bytes, download_name=download_name)
+        fname = f"{req.model}/{uuid.uuid4().hex}.stl"
+        stl_url = upload_to_supabase(fname, stl_bytes)
 
         return {"status": "ok", "stl_url": stl_url, "model": req.model}
 
