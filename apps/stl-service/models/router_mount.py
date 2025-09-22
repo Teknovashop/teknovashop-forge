@@ -1,39 +1,33 @@
-# teknovashop-forge/models/router_mount.py
+# apps/stl-service/models/router_mount.py
+from typing import Dict, Any, Iterable, List, Tuple
 import trimesh
-from trimesh.transformations import translation_matrix as T
+from .utils_geo import plate_with_holes, rectangle_plate, concatenate
 
-def _drill(mesh: trimesh.Trimesh, holes: list, tck: float, base_y: float) -> trimesh.Trimesh:
-    if not holes: 
-        return mesh
-    cutters=[]
-    h=tck*2.2
-    for hspec in holes:
-        x = float(hspec.get("x_mm", 0.0))
-        z = float(hspec.get("z_mm", 0.0))
-        d = max(0.1, float(hspec.get("d_mm", 3.0)))
-        cyl = trimesh.creation.cylinder(radius=d/2.0, height=h, sections=48)
-        # taladro sobre la base (aprox a y = base_y)
-        cyl.apply_transform(T([x, base_y, z]))
-        cutters.append(cyl)
-    if cutters:
-        cutter=trimesh.util.concatenate(cutters)
-        try:
-            return mesh.difference(cutter, engine="scad")
-        except BaseException:
-            return mesh.difference(cutter)
-    return mesh
+def make_model(
+    width: float = 120.0,     # W (ancho base)
+    depth: float = 80.0,      # L (fondo base)
+    flange: float = 60.0,     # ala vertical
+    thickness: float = 4.0,
+    ventilated: bool = True,
+    holes: Iterable[Dict[str, float]] = (),
+) -> trimesh.Trimesh:
+    # Base (L=depth, W=width)
+    base = plate_with_holes(L=depth, W=width, T=thickness,
+                            holes=[(h["x_mm"], h["z_mm"], h["d_mm"]) for h in holes])
+    # Ala (vertical, alto=flange, largo=depth)
+    side_holes: List[Tuple[float, float, float]] = []
+    if ventilated:
+        # taladro Ø6 cada 15mm en 2 filas
+        pitch = 15.0
+        d = 6.0
+        y_rows = [flange * 0.35, flange * 0.7]
+        xs = [x for x in [i for i in range(-int(depth//2), int(depth//2)+1, int(pitch))]]
+        for y in y_rows:
+            for x in xs:
+                side_holes.append((float(x), float(y), d))
 
-def make_model(p: dict) -> trimesh.Trimesh:
-    W   = float(p.get("router_width", 120))
-    D   = float(p.get("router_depth", 80))
-    TCK = float(p.get("thickness", 4))
-    H   = float(p.get("height", D*0.6))
-    holes = p.get("holes") or []
+    wing = rectangle_plate(L=depth, H=flange, T=thickness, holes=side_holes)
+    # Posicionar ala pegada a uno de los lados (z = -width/2)
+    wing.apply_translation((0, flange/2.0, -width/2.0))
 
-    base = trimesh.creation.box(extents=[W, TCK, D]); base.apply_transform(T([0, -D*0.3, 0]))
-    wall = trimesh.creation.box(extents=[W, H, TCK]); wall.apply_transform(T([0, 0, -D/2 + TCK/2]))
-
-    mesh = trimesh.util.concatenate([base, wall])
-    mesh = _drill(mesh, holes, TCK, base_y=-D*0.3)
-    mesh.remove_duplicate_faces(); mesh.remove_degenerate_faces(); mesh.merge_vertices()
-    return mesh
+    return concatenate([base, wing])
