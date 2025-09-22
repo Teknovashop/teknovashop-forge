@@ -1,58 +1,46 @@
-# teknovashop-forge/models/cable_tray.py
+# apps/stl-service/models/cable_tray.py
+from typing import Dict, Any, Iterable, List, Tuple
 import trimesh
-from trimesh.transformations import translation_matrix as T
+from .utils_geo import plate_with_holes, rectangle_plate, concatenate
 
-def _drill(mesh: trimesh.Trimesh, holes: list, H: float, TCK: float) -> trimesh.Trimesh:
-    """Perfora cilindros a lo largo de Y en la base de la bandeja."""
-    if not holes:
-        return mesh
-    cutters = []
-    for h in holes:
-        x = float(h.get("x_mm", 0))
-        z = float(h.get("z_mm", 0))
-        d = max(0.1, float(h.get("d_mm", 3)))
-        r = d / 2.0
-        cyl = trimesh.creation.cylinder(radius=r, height=TCK*2.5, sections=48)
-        y = -H/2.0 + TCK/2.0
-        cyl.apply_transform(T([x, y, z]))
-        cutters.append(cyl)
-    if cutters:
-        cutter = trimesh.util.concatenate(cutters)
-        try:
-            return mesh.difference(cutter, engine="scad")
-        except BaseException:
-            return mesh.difference(cutter)
-    return mesh
+def make_model(
+    width: float = 60.0,      # W (ancho útil)
+    height: float = 25.0,     # H (alas)
+    length: float = 180.0,    # L
+    thickness: float = 3.0,
+    ventilated: bool = True,
+    holes: Iterable[Dict[str, float]] = (),
+) -> trimesh.Trimesh:
+    # Base con agujeros libres (x,z,d)
+    base = plate_with_holes(L=length, W=width, T=thickness,
+                            holes=[(h["x_mm"], h["z_mm"], h["d_mm"]) for h in holes])
 
-def make_model(p: dict) -> trimesh.Trimesh:
-    """
-    Canal en U: X=length, Y=height, Z=width.
-    """
-    L = float(p.get("length", 180))
-    H = float(p.get("height", 25))
-    W = float(p.get("width",  60))
-    TCK = float(p.get("thickness", 3))
-    ventilated = bool(p.get("ventilated", True))
-    holes = p.get("holes") or []
-
-    base  = trimesh.creation.box(extents=[L, TCK, W]);  base.apply_transform(T([0, -H/2 + TCK/2, 0]))
-    side1 = trimesh.creation.box(extents=[L, H, TCK]);  side1.apply_transform(T([0, 0, -W/2 + TCK/2]))
-    side2 = trimesh.creation.box(extents=[L, H, TCK]);  side2.apply_transform(T([0, 0,  W/2 - TCK/2]))
-
-    parts = [base, side1, side2]
-
+    # Paredes laterales (placas verticales). Si ventilated, abrimos rejilla simple por slots.
+    side_holes: List[Tuple[float, float, float]] = []
     if ventilated:
-        n = max(3, int(L // 40))
-        gap = L / (n + 1)
-        rib_w = max(2.0, min(6.0, W * 0.08))
-        for i in range(1, n + 1):
-            rib = trimesh.creation.box(extents=[rib_w, TCK * 1.05, W - 2 * TCK])
-            rib.apply_transform(T([-L/2 + i * gap, -H/2 + TCK/2 + 0.01, 0]))
-            parts.append(rib)
+        # patrón: círculos Ø5mm cada 12mm en 2 filas
+        pitch = 12.0
+        d = 5.0
+        y_rows = [height * 0.33, height * 0.66]
+        xs = [x for x in [i for i in range(-int(length//2), int(length//2)+1, int(pitch))]]
+        for y in y_rows:
+            for x in xs:
+                side_holes.append((float(x), float(y), d))
 
-    mesh = trimesh.util.concatenate(parts)
-    mesh = _drill(mesh, holes, H, TCK)
-    mesh.remove_duplicate_faces()
-    mesh.remove_degenerate_faces()
-    mesh.merge_vertices()
-    return mesh
+    side_L = length
+    side_H = height
+    wall_T = thickness
+
+    left = rectangle_plate(L=side_L, H=side_H, T=wall_T,
+                           holes=side_holes).copy()
+    right = rectangle_plate(L=side_L, H=side_H, T=wall_T,
+                            holes=side_holes).copy()
+
+    # Posicionar paredes a ±W/2
+    left.apply_translation((0, height/2.0, +width/2.0))
+    right.apply_translation((0, height/2.0, -width/2.0))
+
+    # Elevar base ligeramente para que quede al ras interior
+    base.apply_translation((0, 0.0, 0))
+
+    return concatenate([base, left, right])
