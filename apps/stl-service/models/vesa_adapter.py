@@ -1,20 +1,24 @@
 # apps/stl-service/models/vesa_adapter.py
-from typing import Iterable, Dict, Any
-import trimesh
+from typing import Iterable, Tuple, List
+import math
+import trimesh as tm
 from .utils_geo import plate_with_holes
 
-def make_model(
-    vesa_mm: float = 100.0,
-    thickness: float = 4.0,
-    clearance: float = 1.0,
-    vesa_hole: float = 5.0,
-    extra_holes: Iterable[Dict[str, float]] = (),
-) -> trimesh.Trimesh:
-    L = W = vesa_mm + clearance * 2.0
-    # agujeros patrón VESA
-    off = vesa_mm / 2.0
-    vesa = [(+off, +off, vesa_hole), (+off, -off, vesa_hole), (-off, +off, vesa_hole), (-off, -off, vesa_hole)]
-    # extra
-    extras = [(h["x_mm"], h["z_mm"], h["d_mm"]) for h in extra_holes]
-    holes = vesa + extras
-    return plate_with_holes(L=L, W=W, T=thickness, holes=holes)
+def _vesa_pattern(vesa_mm: float, hole: float) -> List[Tuple[float, float, float]]:
+    s = float(vesa_mm) / 2.0
+    return [(+s, +s, hole), (-s, +s, hole), (+s, -s, hole), (-s, -s, hole)]
+
+def make_model(p: dict) -> tm.Trimesh:
+    vesa_mm = float(p.get("vesa_mm", 100.0))
+    t       = float(p.get("thickness", 4.0))
+    clr     = float(p.get("clearance", 1.0))
+    hole_d  = float(p.get("hole", 5.0))
+
+    # placa cuadrada con algo de margen respecto al patrón
+    L = W = vesa_mm + 2.0 * max(10.0, clr * 5.0)
+
+    auto = _vesa_pattern(vesa_mm, hole_d)
+    free: Iterable[Tuple[float, float, float]] = p.get("holes") or []
+    holes = [*auto, *[(float(x), float(z), float(d)) for (x, z, d) in free]]
+
+    return plate_with_holes(L=L, W=W, T=t, holes=holes)
