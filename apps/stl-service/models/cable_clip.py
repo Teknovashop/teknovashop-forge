@@ -1,26 +1,45 @@
 # apps/stl-service/models/cable_clip.py
-import shapely.geometry as sg
-import shapely.affinity as sa
-import shapely.ops as so
-import trimesh
+import math
+import trimesh as tm
+from trimesh.creation import cylinder, box
+from trimesh.boolean import difference, union
 
-def make_model(
-    diameter: float = 8.0,
-    width: float = 12.0,
-    thickness: float = 2.4,
-) -> trimesh.Trimesh:
-    """
-    Clip tipo “C”: se hace como un anillo circular con hueco y se extruye.
-    """
-    r = diameter / 2.0
-    outer = sg.Point(0,0).buffer(r + thickness, resolution=128)
-    inner = sg.Point(0,0).buffer(r, resolution=128)
-    ring = outer.difference(inner)
-    # abrimos la “C” eliminando un sector
-    gap = sg.box(-1e3, -r, r*0.25, +r)  # ranura en un lado
-    cshape = ring.difference(gap)
-    # dar ancho en Z: hacemos la extrusión en Y y el “ancho” es el espesor de extrusión T,
-    # luego el usuario puede girarlo si quiere.
-    mesh = trimesh.creation.extrude_polygon(cshape, width)
-    mesh.apply_translation((0, width/2.0, 0))
-    return mesh
+def make_model(p: dict) -> tm.Trimesh:
+    d   = float(p.get("diameter", 8.0))     # diámetro del cable
+    w   = float(p.get("width", 12.0))       # ancho de la abrazadera
+    t   = float(p.get("thickness", 2.4))    # espesor material
+
+    r_ext = d/2.0 + t
+    r_int = d/2.0
+
+    # aro (anillo) como cilindro exterior menos interior, luego cortar 1/3 para dejar "C"
+    h = w
+    cyl_ext = cylinder(radius=r_ext, height=h, sections=64)
+    cyl_int = cylinder(radius=r_int, height=h*1.2, sections=64)
+    try:
+        ring = difference([cyl_ext, cyl_int], engine="manifold")
+    except Exception:
+        # fallback: sin agujero → cilindro macizo del radio externo
+        ring = cyl_ext.copy()
+
+    # corte para formar la "C"
+    cut_w = r_ext * 0.9
+    cut = box(extents=(cut_w, h*1.5, 2*r_ext))
+    cut.apply_translation((r_ext*0.55, 0, 0))
+    try:
+        clip = difference([ring, cut], engine="manifold")
+    except Exception:
+        clip = ring
+
+    # pestaña plana (opcional simple)
+    tab = box(extents=(r_ext*1.2, t, h))
+    tab.apply_translation((-r_ext*0.9, t/2.0, 0))
+
+    try:
+        clip = union([clip, tab], engine="manifold")
+    except Exception:
+        clip = tm.util.concatenate([clip, tab])
+
+    # Centrar base en Y=0
+    clip.apply_translation((0, 0, 0))
+    return clip
