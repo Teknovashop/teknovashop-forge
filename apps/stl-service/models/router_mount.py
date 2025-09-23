@@ -1,33 +1,26 @@
 # apps/stl-service/models/router_mount.py
-from typing import Dict, Any, Iterable, List, Tuple
-import trimesh
+from typing import Iterable, Tuple
+import trimesh as tm
 from .utils_geo import plate_with_holes, rectangle_plate, concatenate
 
-def make_model(
-    width: float = 120.0,     # W (ancho base)
-    depth: float = 80.0,      # L (fondo base)
-    flange: float = 60.0,     # ala vertical
-    thickness: float = 4.0,
-    ventilated: bool = True,
-    holes: Iterable[Dict[str, float]] = (),
-) -> trimesh.Trimesh:
-    # Base (L=depth, W=width)
-    base = plate_with_holes(L=depth, W=width, T=thickness,
-                            holes=[(h["x_mm"], h["z_mm"], h["d_mm"]) for h in holes])
-    # Ala (vertical, alto=flange, largo=depth)
-    side_holes: List[Tuple[float, float, float]] = []
-    if ventilated:
-        # taladro Ø6 cada 15mm en 2 filas
-        pitch = 15.0
-        d = 6.0
-        y_rows = [flange * 0.35, flange * 0.7]
-        xs = [x for x in [i for i in range(-int(depth//2), int(depth//2)+1, int(pitch))]]
-        for y in y_rows:
-            for x in xs:
-                side_holes.append((float(x), float(y), d))
+def make_model(p: dict) -> tm.Trimesh:
+    W   = float(p.get("router_width", 120.0))  # X de la placa trasera
+    D   = float(p.get("router_depth", 80.0))   # X de la base
+    T   = float(p.get("thickness", 4.0))
+    free: Iterable[Tuple[float,float,float]] = p.get("holes") or []
 
-    wing = rectangle_plate(L=depth, H=flange, T=thickness, holes=side_holes)
-    # Posicionar ala pegada a uno de los lados (z = -width/2)
-    wing.apply_translation((0, flange/2.0, -width/2.0))
+    # Base (soporte horizontal, sobre el que se apoya el router)
+    base = plate_with_holes(L=D, W=W, T=T, holes=[])  # agujeros suelen ir en la trasera
+    # Trasera (vertical) con agujeros de fijación
+    back = rectangle_plate(L=W, H=W*0.7, T=T, holes=[(float(x), float(y), float(d)) for (x,y,d) in []])  # sin auto
+    # Colocar trasera al borde de la base (en X ~ 0)
+    back.apply_translation((0, (W*0.7)/2.0, -W/2.0))  # atrás
+    base.apply_translation((D/2.0, 0.0, 0.0))
 
-    return concatenate([base, wing])
+    # Si el usuario añadió 'holes' (x,y,d) para la trasera, perfóralos
+    if free:
+        # convertir trasera en placa con agujeros (L=W, H=..., T=T)
+        back = rectangle_plate(L=W, H=W*0.7, T=T, holes=[(float(x), float(y), float(d)) for (x,y,d) in free])
+        back.apply_translation((0, (W*0.7)/2.0, -W/2.0))
+
+    return concatenate([base, back])
