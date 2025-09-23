@@ -1,35 +1,55 @@
 # apps/stl-service/models/cable_tray.py
-from typing import Iterable, Tuple, List
-import trimesh as tm
-from .utils_geo import plate_with_holes, rectangle_plate, concatenate
+from typing import Dict, Any
+import trimesh
+from ._helpers import parse_holes
+from .utils_geo import rectangle_plate, plate_with_holes, concatenate
 
-def make_model(p: dict) -> tm.Trimesh:
-    W   = float(p.get("width", 60.0))     # Z
-    H   = float(p.get("height", 25.0))    # Y
-    L   = float(p.get("length", 180.0))   # X
-    T   = float(p.get("thickness", 3.0))
-    vent= bool(p.get("ventilated", True))
-    free: Iterable[Tuple[float,float,float]] = p.get("holes") or []
+NAME = "cable_tray"
 
-    # Base con agujeros libres
-    base = plate_with_holes(L=L, W=W, T=T, holes=[(float(x), float(z), float(d)) for (x,z,d) in free])
-    base.apply_translation((0, 0, 0))  # centrada sobre X/Z, apoyada en Y=0 por util
+TYPES = {
+    "width": "float",       # separación entre laterales (profundidad de la bandeja)
+    "height": "float",      # altura de los laterales
+    "length": "float",      # largo
+    "thickness": "float",   # espesor chapa
+    "ventilated": "bool",   # si True, ranuras en la base
+    "holes": "list[tuple[float, float, float], tuple[float, float, float]]",  # agujeros en el lateral izquierdo (x,y,d) y derecho (x,y,d)
+}
 
-    # Laterales
-    side_holes: List[Tuple[float, float, float]] = []
-    if vent:
-        pitch_x = 18.0
-        d = 4.0
-        xs = [x for x in range(-int(L//2), int(L//2)+1, int(pitch_x))]
-        y_rows = [H*0.35, H*0.7]
-        for y in y_rows:
-            for x in xs:
-                side_holes.append((float(x), float(y), d))
+DEFAULTS = {
+    "width": 60.0,
+    "height": 25.0,
+    "length": 180.0,
+    "thickness": 3.0,
+    "ventilated": True,
+    "holes": [],  # (x,y,d) relativo al lateral (placa vertical)
+}
 
-    left  = rectangle_plate(L=L, H=H, T=T, holes=side_holes).copy()
-    right = rectangle_plate(L=L, H=H, T=T, holes=side_holes).copy()
-    # colocar a ±W/2
-    left.apply_translation((0, H/2.0, +W/2.0))
-    right.apply_translation((0, H/2.0, -W/2.0))
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    W = float(params.get("width", DEFAULTS["width"]))
+    H = float(params.get("height", DEFAULTS["height"]))
+    L = float(params.get("length", DEFAULTS["length"]))
+    T = float(params.get("thickness", DEFAULTS["thickness"]))
+    holes = parse_holes(params.get("holes", []))
+    ventilated = bool(params.get("ventilated", DEFAULTS["ventilated"]))
 
-    return concatenate([base, left, right])
+    # Dos laterales (placas verticales) + base inferior (placa horizontal).
+    left = rectangle_plate(L, H, T, holes)              # lateral izquierdo
+    right = rectangle_plate(L, H, T, holes)             # reutilizamos mismos agujeros
+    right.apply_translation((0, 0, W))                  # separarlo por el ancho
+
+    # Base: placa horizontal con posibles ranuras “simuladas” como agujeros grandes (opcional)
+    base_holes = []
+    if ventilated:
+        # Colocamos “ventanas” circulares a lo largo del centro solo para alivianar.
+        n = max(1, int(L // 30))
+        step = L / (n + 1)
+        x0 = -L / 2.0 + step
+        for i in range(n):
+            base_holes.append((x0 + i * step, 0.0, min(8.0, W * 0.5)))
+
+    base = plate_with_holes(L, W, T, base_holes)
+    base.apply_translation((0, 0, W / 2.0))             # centrar en Z entre los laterales
+
+    # Ensamblado
+    tray = concatenate([left, right, base])
+    return tray
