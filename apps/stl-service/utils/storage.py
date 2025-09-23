@@ -1,25 +1,60 @@
 # apps/stl-service/utils/storage.py
-import os, json, httpx, uuid
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
+import os
+import httpx
 
-class Storage:
-    def __init__(self):
-        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-            raise RuntimeError("SUPABASE_URL o SUPABASE_SERVICE_KEY no configurados")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+BUCKET_DEFAULT = os.environ.get("SUPABASE_BUCKET", "forge-stl")
 
-    def upload_stl_and_sign(self, stl_bytes: bytes, filename: str, model_folder: str, expires_in: int = 300) -> str:
-        key = f"{model_folder}/{uuid.uuid4().hex}/{filename}"
-        up_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{key}"
-        sg_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{key}"
-        headers = {"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"}
+BASE = f"{SUPABASE_URL}/storage/v1"
+AUTH_HEADERS = {
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+}
 
-        with httpx.Client(timeout=60) as c:
-            r = c.post(up_url, headers={**headers, "Content-Type":"application/octet-stream"}, content=stl_bytes)
-            if r.status_code not in (200,201): raise RuntimeError(f"Upload fallo {r.status_code}: {r.text}")
-            s = c.post(sg_url, headers={**headers, "Content-Type":"application/json"}, content=json.dumps({"expiresIn": expires_in}))
-            if s.status_code != 200: raise RuntimeError(f"Sign fallo {s.status_code}: {s.text}")
-            signedURL = s.json().get("signedURL")
-            return f"{SUPABASE_URL}{signedURL}"
+def upload_stl_and_sign(
+    data: bytes,
+    key: str,
+    bucket: str | None = None,
+    expires_sec: int = 3600,
+) -> str:
+    """
+    Sube el STL a Supabase Storage y devuelve una URL firmada lista para descargar.
+    - data: contenido .stl en bytes
+    - key:  ruta/archivo dentro del bucket, p.ej. "qr_plate/abc123.stl"
+    - bucket: nombre de bucket (por defecto SUPABASE_BUCKET)
+    - expires_sec: segundos de validez del token
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY")
+
+    bucket = bucket or BUCKET_DEFAULT
+    object_path = f"{bucket}/{key}"
+
+    # 1) Upload
+    up_url = f"{BASE}/object/{object_path}"
+    up_headers = {
+        **AUTH_HEADERS,
+        # STL MIME: muchos visores aceptan estas dos; application/sla es clásico
+        "Content-Type": "application/sla",
+        "x-upsert": "true",  # sobreescribe si ya existe
+    }
+    up_res = httpx.post(up_url, content=data, headers=up_headers, timeout=60.0)
+    up_res.raise_for_status()
+
+    # 2) Firmar
+    sign_url = f"{BASE}/object/sign/{object_path}"
+    sign_headers = {
+        **AUTH_HEADERS,
+        "Content-Type": "application/json",
+    }
+    sign_res = httpx.post(sign_url, json={"expiresIn": expires_sec}, headers=sign_headers, timeout=30.0)
+    sign_res.raise_for_status()
+
+    # Supabase devuelve {"signedURL": "/object/sign/<bucket>/<key>?token=..."}
+    signed_rel = sign_res.json().get("signedURL")
+    if not signed_rel:
+        raise RuntimeError("Supabase no devolvió signedURL")
+
+    # IMPORTANTE: anteponer /storage/v1
+    return f"{BASE}{signed_rel}"
