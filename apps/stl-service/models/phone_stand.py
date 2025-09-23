@@ -15,7 +15,6 @@ def make_model(p: dict) -> tm.Trimesh:
     panel = tm.creation.box((h, t, width))
     panel.apply_translation((h/2, t/2, width/2))
 
-    # rotar panel alrededor del borde trasero (x=t)
     rot = tm.transformations.rotation_matrix(math.radians(-angle), (0,0,1), point=(t,0,0))
     panel.apply_transform(rot)
 
