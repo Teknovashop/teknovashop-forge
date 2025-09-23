@@ -1,26 +1,28 @@
 # apps/stl-service/models/router_mount.py
-from typing import Iterable, Tuple
-import trimesh as tm
-from .utils_geo import plate_with_holes, rectangle_plate, concatenate
+from typing import Dict, Any
+import trimesh
+from ._helpers import parse_holes
+from .utils_geo import plate_with_holes
 
-def make_model(p: dict) -> tm.Trimesh:
-    W   = float(p.get("router_width", 120.0))  # X de la placa trasera
-    D   = float(p.get("router_depth", 80.0))   # X de la base
-    T   = float(p.get("thickness", 4.0))
-    free: Iterable[Tuple[float,float,float]] = p.get("holes") or []
+NAME = "router_mount"
 
-    # Base (soporte horizontal, sobre el que se apoya el router)
-    base = plate_with_holes(L=D, W=W, T=T, holes=[])  # agujeros suelen ir en la trasera
-    # Trasera (vertical) con agujeros de fijación
-    back = rectangle_plate(L=W, H=W*0.7, T=T, holes=[(float(x), float(y), float(d)) for (x,y,d) in []])  # sin auto
-    # Colocar trasera al borde de la base (en X ~ 0)
-    back.apply_translation((0, (W*0.7)/2.0, -W/2.0))  # atrás
-    base.apply_translation((D/2.0, 0.0, 0.0))
+TYPES = {
+    "router_width": "float",   # X
+    "router_depth": "float",   # Z (ancho de la placa)
+    "thickness": "float",      # Y
+    "holes": "list[]",         # cualquiera; se normaliza a (x,y,d)
+}
 
-    # Si el usuario añadió 'holes' (x,y,d) para la trasera, perfóralos
-    if free:
-        # convertir trasera en placa con agujeros (L=W, H=..., T=T)
-        back = rectangle_plate(L=W, H=W*0.7, T=T, holes=[(float(x), float(y), float(d)) for (x,y,d) in free])
-        back.apply_translation((0, (W*0.7)/2.0, -W/2.0))
+DEFAULTS = {
+    "router_width": 120.0,
+    "router_depth": 80.0,
+    "thickness": 4.0,
+    "holes": [],
+}
 
-    return concatenate([base, back])
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(params.get("router_width", DEFAULTS["router_width"]))
+    W = float(params.get("router_depth", DEFAULTS["router_depth"]))
+    T = float(params.get("thickness", DEFAULTS["thickness"]))
+    holes = parse_holes(params.get("holes", []))
+    return plate_with_holes(L, W, T, holes)
