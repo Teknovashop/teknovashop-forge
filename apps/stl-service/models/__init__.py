@@ -1,15 +1,51 @@
 # apps/stl-service/models/__init__.py
 # Registro central de modelos. El backend importa de aquí.
 
-from .vesa_adapter import NAME as vesa_adapter_name, TYPES as vesa_adapter_types, DEFAULTS as vesa_adapter_defaults, make_model as vesa_adapter_make
-from .qr_plate import NAME as qr_plate_name, TYPES as qr_plate_types, DEFAULTS as qr_plate_defaults, make_model as qr_plate_make
-from .router_mount import NAME as router_mount_name, TYPES as router_mount_types, DEFAULTS as router_mount_defaults, make_model as router_mount_make
-from .cable_tray import NAME as cable_tray_name, TYPES as cable_tray_types, DEFAULTS as cable_tray_defaults, make_model as cable_tray_make
-from .enclosure_ip65 import NAME as enclosure_ip65_name, TYPES as enclosure_ip65_types, DEFAULTS as enclosure_ip65_defaults, make_model as enclosure_ip65_make
-from .cable_clip import NAME as cable_clip_name, TYPES as cable_clip_types, DEFAULTS as cable_clip_defaults, make_model as cable_clip_make
-from .phone_stand import NAME as phone_stand_name, TYPES as phone_stand_types, DEFAULTS as phone_stand_defaults, make_model as phone_stand_make
-from . import vesa_shelf
-REGISTRY["vesa_shelf"] = vesa_shelf
+# --- Núcleo: modelos existentes (deben estar) ---
+from .vesa_adapter import (
+    NAME as vesa_adapter_name,
+    TYPES as vesa_adapter_types,
+    DEFAULTS as vesa_adapter_defaults,
+    make_model as vesa_adapter_make,
+)
+from .qr_plate import (
+    NAME as qr_plate_name,
+    TYPES as qr_plate_types,
+    DEFAULTS as qr_plate_defaults,
+    make_model as qr_plate_make,
+)
+from .router_mount import (
+    NAME as router_mount_name,
+    TYPES as router_mount_types,
+    DEFAULTS as router_mount_defaults,
+    make_model as router_mount_make,
+)
+from .cable_tray import (
+    NAME as cable_tray_name,
+    TYPES as cable_tray_types,
+    DEFAULTS as cable_tray_defaults,
+    make_model as cable_tray_make,
+)
+from .enclosure_ip65 import (
+    NAME as enclosure_ip65_name,
+    TYPES as enclosure_ip65_types,
+    DEFAULTS as enclosure_ip65_defaults,
+    make_model as enclosure_ip65_make,
+)
+from .cable_clip import (
+    NAME as cable_clip_name,
+    TYPES as cable_clip_types,
+    DEFAULTS as cable_clip_defaults,
+    make_model as cable_clip_make,
+)
+from .phone_stand import (
+    NAME as phone_stand_name,
+    TYPES as phone_stand_types,
+    DEFAULTS as phone_stand_defaults,
+    make_model as phone_stand_make,
+)
+
+# Mapa principal (estructura establecida en tu proyecto)
 REGISTRY = {
     vesa_adapter_name: {
         "types": vesa_adapter_types,
@@ -47,3 +83,54 @@ REGISTRY = {
         "make": phone_stand_make,
     },
 }
+
+# --- Helper para registrar modelos opcionales de forma segura ---
+def _infer_types_from_defaults(defaults: dict) -> dict:
+    """Dada una tabla de DEFAULTS, infiere un mapa de TYPES compatible (str:int/float/bool/str/array/any)."""
+    tmap = {}
+    for k, v in (defaults or {}).items():
+        if isinstance(v, bool):
+            tmap[k] = "bool"
+        elif isinstance(v, int):
+            tmap[k] = "int"
+        elif isinstance(v, float):
+            tmap[k] = "float"
+        elif isinstance(v, str):
+            tmap[k] = "str"
+        elif isinstance(v, (list, tuple)):
+            tmap[k] = "array"
+        else:
+            tmap[k] = "any"
+    return tmap
+
+def _safe_register(module_name: str, fallback_name: str):
+    """
+    Intenta importar un módulo de modelo opcional y registrarlo en REGISTRY.
+    - Acepta NAME, DEFAULTS, TYPES, y make_model/make.
+    - Si TYPES no existe, lo infiere de DEFAULTS.
+    - Si falla el import, no rompe el arranque.
+    """
+    try:
+        # Import relativo dentro del paquete
+        module = __import__(f".{module_name}", globals(), locals(), fromlist=["*"])
+    except Exception as e:
+        print(f"[models] {module_name} deshabilitado: {e}")
+        return
+
+    name = getattr(module, "NAME", fallback_name)
+    defaults = getattr(module, "DEFAULTS", {})
+    types = getattr(module, "TYPES", None)
+    if types is None:
+        types = _infer_types_from_defaults(defaults)
+
+    make = getattr(module, "make_model", None) or getattr(module, "make", None)
+    if not callable(make):
+        print(f"[models] {module_name}: no se encontró 'make_model'/'make'; no se registra")
+        return
+
+    REGISTRY[name] = {"types": types, "defaults": defaults, "make": make}
+    print(f"[models] {module_name} registrado como '{name}'")
+
+# --- Registro de modelos opcionales (no bloquean si fallan) ---
+# vesa_shelf: implementado con trimesh para evitar dependencias extra (cadquery).
+_safe_register("vesa_shelf", "vesa_shelf")
