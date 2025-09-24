@@ -8,7 +8,8 @@ from .cable_tray import NAME as cable_tray_name, TYPES as cable_tray_types, DEFA
 from .enclosure_ip65 import NAME as enclosure_ip65_name, TYPES as enclosure_ip65_types, DEFAULTS as enclosure_ip65_defaults, make_model as enclosure_ip65_make
 from .cable_clip import NAME as cable_clip_name, TYPES as cable_clip_types, DEFAULTS as cable_clip_defaults, make_model as cable_clip_make
 from .phone_stand import NAME as phone_stand_name, TYPES as phone_stand_types, DEFAULTS as phone_stand_defaults, make_model as phone_stand_make
-
+from . import vesa_shelf
+REGISTRY["vesa_shelf"] = vesa_shelf
 REGISTRY = {
     vesa_adapter_name: {
         "types": vesa_adapter_types,
