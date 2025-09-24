@@ -1,6 +1,6 @@
 # teknovashop-forge/app.py
 import os, uuid, time
-from typing import List, Literal, Optional, Any, Tuple, Union
+from typing import List, Literal, Optional, Any, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -38,6 +38,7 @@ class HoleSpec(BaseModel):
     nz: Optional[float] = None
     axis: Optional[str] = None
 
+
 ModelKind = Literal[
     "cable_tray",
     "router_mount",
@@ -47,6 +48,7 @@ ModelKind = Literal[
     "enclosure_ip65",
     "cable_clip",
 ]
+
 
 class GenerateReq(BaseModel):
     model: ModelKind
@@ -88,9 +90,11 @@ class GenerateReq(BaseModel):
     clip_diameter: Optional[float] = None
     clip_width: Optional[float] = None
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
+
 
 # ---------- helpers de saneo ----------
 def _as_float(x: Any, default: float = 0.0) -> float:
@@ -98,6 +102,7 @@ def _as_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return float(default)
+
 
 def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
     if not isinstance(d, dict):
@@ -109,6 +114,7 @@ def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
     if x is None or z is None or dval is None:
         return None
     return (_as_float(x), _as_float(z), _as_float(dval))
+
 
 def _sanitize(value: Any, context_key: str = "") -> Any:
     """
@@ -145,12 +151,25 @@ def _sanitize(value: Any, context_key: str = "") -> Any:
     except Exception:
         return value
 
+
 def _params_debug_types(d: dict) -> dict:
     def t(v: Any) -> str:
         if isinstance(v, (list, tuple)):
             return f"{type(v).__name__}[{', '.join(t(x) for x in v)}]"
         return type(v).__name__
     return {k: t(v) for k, v in d.items()}
+
+
+def slug_folder(model_name: str) -> str:
+    """Normaliza nombre de modelo a carpeta kebab-case.
+    Ej.: 'cable_tray' -> 'cable-tray'
+    """
+    import re
+    s = (model_name or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)      # separadores -> '-'
+    s = re.sub(r"-+", "-", s).strip("-")   # colapsa guiones
+    return s
+
 
 def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -182,6 +201,7 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
     if not signed:
         raise HTTPException(500, "No signedURL in Supabase response")
     return f"{SUPABASE_URL}{signed}"
+
 
 @app.post("/generate")
 def generate(req: GenerateReq):
@@ -290,7 +310,10 @@ def generate(req: GenerateReq):
         if not stl_bytes:
             raise HTTPException(500, "STL vacío")
 
-        fname = f"{model}/{uuid.uuid4().hex}.stl"
+        # --- RUTA NORMALIZADA (kebab-case) ---
+        folder = slug_folder(model)                 # p.ej. "cable-tray"
+        fname = f"{folder}/{uuid.uuid4().hex}.stl"  # forge-stl/<folder>/<uuid>.stl
+
         stl_url = upload_to_supabase(fname, stl_bytes)
         return {"status": "ok", "stl_url": stl_url, "model": model}
 
