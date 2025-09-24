@@ -18,9 +18,17 @@ from models.cable_clip import make_model as make_cable_clip
 # --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
+
+def _clean_bucket(name: str) -> str:
+    name = (name or "").strip()
+    if name.startswith("/"): name = name[1:]
+    if name.endswith("/"): name = name[:-1]
+    return name
+
+SUPABASE_BUCKET = _clean_bucket(os.environ.get("SUPABASE_BUCKET", "forge-stl"))
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[WARN] Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY")
+print(f"[cfg] bucket='{SUPABASE_BUCKET}' url='{SUPABASE_URL}'")
 
 # --------- APP ---------
 app = FastAPI(title="Teknovashop Forge")
@@ -30,14 +38,11 @@ class HoleSpec(BaseModel):
     x_mm: float
     z_mm: float
     d_mm: float = Field(gt=0)
-
-    # extras (se ignoran en makers antiguos)
     y_mm: Optional[float] = None
     nx: Optional[float] = None
     ny: Optional[float] = None
     nz: Optional[float] = None
     axis: Optional[str] = None
-
 
 ModelKind = Literal[
     "cable_tray",
@@ -49,65 +54,52 @@ ModelKind = Literal[
     "cable_clip",
 ]
 
-
 class GenerateReq(BaseModel):
     model: ModelKind
-
     holes: Optional[List[HoleSpec]] = None
     thickness_mm: Optional[float] = None
     ventilated: Optional[bool] = True
-
     # Cable tray
     width_mm: Optional[float] = None
     height_mm: Optional[float] = None
     length_mm: Optional[float] = None
-
     # VESA
     vesa_mm: Optional[float] = None
     clearance_mm: Optional[float] = None
     hole_diameter_mm: Optional[float] = None
-
     # Router
     router_width_mm: Optional[float] = None
     router_depth_mm: Optional[float] = None
-
     # Phone stand
     angle_deg: Optional[float] = None
     support_depth: Optional[float] = None
     width: Optional[float] = None
-
     # QR plate
     slot_mm: Optional[float] = None
     screw_d_mm: Optional[float] = None
-
     # Enclosure
     wall_mm: Optional[float] = None
     box_length: Optional[float] = None
     box_width: Optional[float] = None
     box_height: Optional[float] = None
-
     # Cable clip
     clip_diameter: Optional[float] = None
     clip_width: Optional[float] = None
-
 
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
 
-
-# ---------- helpers de saneo ----------
+# ---------- helpers ----------
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
     except Exception:
         return float(default)
 
-
 def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
     if not isinstance(d, dict):
         return None
-    # Acepta x/z/d o x_mm/z_mm/d_mm
     x = d.get("x_mm", d.get("x"))
     z = d.get("z_mm", d.get("z"))
     dval = d.get("d_mm", d.get("d") or d.get("diameter"))
@@ -115,42 +107,21 @@ def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
         return None
     return (_as_float(x), _as_float(z), _as_float(dval))
 
-
 def _sanitize(value: Any, context_key: str = "") -> Any:
-    """
-    Sanea recursivamente:
-      - numbers -> float
-      - dict agujero -> (x,z,d)
-      - listas/tuplas -> procesa cada elemento
-      - dict genérico -> procesa valores
-    """
-    # Dict con forma de agujero
     if isinstance(value, dict):
         as_hole = _hole_dict_to_tuple(value)
         if as_hole is not None:
             return as_hole
-        # Dict genérico: sanea cada valor
         return {k: _sanitize(v, f"{context_key}.{k}" if context_key else k) for k, v in value.items()}
-
-    # Lista/Tupla: sanea cada item
     if isinstance(value, (list, tuple)):
-        out = []
-        for i, item in enumerate(value):
-            item_s = _sanitize(item, f"{context_key}[{i}]")
-            out.append(item_s)
-        # si es tupla, devolvemos tupla; si no, lista
+        out = [ _sanitize(item, f"{context_key}[{i}]") for i, item in enumerate(value) ]
         return tuple(out) if isinstance(value, tuple) else out
-
-    # Booleans tal cual
     if isinstance(value, bool):
         return value
-
-    # Números/cadenas -> float si son numéricos
     try:
         return _as_float(value)
     except Exception:
         return value
-
 
 def _params_debug_types(d: dict) -> dict:
     def t(v: Any) -> str:
@@ -159,17 +130,12 @@ def _params_debug_types(d: dict) -> dict:
         return type(v).__name__
     return {k: t(v) for k, v in d.items()}
 
-
 def slug_folder(model_name: str) -> str:
-    """Normaliza nombre de modelo a carpeta kebab-case.
-    Ej.: 'cable_tray' -> 'cable-tray'
-    """
     import re
     s = (model_name or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s)      # separadores -> '-'
-    s = re.sub(r"-+", "-", s).strip("-")   # colapsa guiones
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
     return s
-
 
 def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -200,15 +166,20 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
     signed = data.get("signedURL") or data.get("signedUrl")
     if not signed:
         raise HTTPException(500, "No signedURL in Supabase response")
-    return f"{SUPABASE_URL}{signed}"
 
+    # Forzar descarga con nombre de archivo
+    from urllib.parse import urlencode
+    filename = os.path.basename(path) or "forge.stl"
+    sep = "&" if "?" in signed else "?"
+    signed_with_download = f"{signed}{sep}{urlencode({'download': filename})}"
+
+    return f"{SUPABASE_URL}{signed_with_download}"
 
 @app.post("/generate")
 def generate(req: GenerateReq):
     try:
         model = req.model
 
-        # Construimos params base por modelo (valores por defecto ya en float)
         if model == "cable_tray":
             params = dict(
                 width=req.width_mm or 60,
@@ -218,7 +189,6 @@ def generate(req: GenerateReq):
                 ventilated=bool(req.ventilated),
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "vesa_adapter":
             params = dict(
                 vesa_mm=req.vesa_mm or 100,
@@ -227,7 +197,6 @@ def generate(req: GenerateReq):
                 hole=req.hole_diameter_mm or 5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "router_mount":
             params = dict(
                 router_width=req.router_width_mm or 120,
@@ -235,20 +204,15 @@ def generate(req: GenerateReq):
                 thickness=req.thickness_mm or 4,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "phone_stand":
             angle_val = req.angle_deg or 60
             depth_val = req.support_depth or 110
             params = dict(
-                angle_deg=angle_val,
-                angle=angle_val,               # alias compat
-                support_depth=depth_val,
-                depth=depth_val,               # alias compat
+                angle_deg=angle_val, angle=angle_val,
+                support_depth=depth_val, depth=depth_val,
                 width=req.width or 80,
                 thickness=req.thickness_mm or 4,
-                # phone_stand no usa holes
             )
-
         elif model == "qr_plate":
             params = dict(
                 length=req.length_mm or 90,
@@ -258,7 +222,6 @@ def generate(req: GenerateReq):
                 screw_d_mm=req.screw_d_mm or 6.5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "enclosure_ip65":
             params = dict(
                 length=req.box_length or req.length_mm or 201,
@@ -267,7 +230,6 @@ def generate(req: GenerateReq):
                 wall=req.wall_mm or req.thickness_mm or 5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "cable_clip":
             params = dict(
                 diameter=req.clip_diameter or 8,
@@ -277,17 +239,13 @@ def generate(req: GenerateReq):
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Saneo RECURSIVO de todos los parámetros
         params = _sanitize(params, model)
 
-        # Log de diagnóstico (tipos)
-        print(f"[generate] model={model} types={_params_debug_types(params)}")
-        if isinstance(params, dict) and "holes" in params:
-            holes = params.get("holes") or []
-            if holes:
-                print(f"[generate] holes[0] sample={repr(holes[0])} type={type(holes[0]).__name__}")
+        print(f"[generate] bucket='{SUPABASE_BUCKET}' model={model} types={_params_debug_types(params)}")
+        if isinstance(params, dict) and "holes" in params and (params.get("holes") or []):
+            print(f"[generate] holes[0] sample={repr(params['holes'][0])} type={type(params['holes'][0]).__name__}")
 
-        # Llamada al maker correspondiente
+        # Maker
         if model == "cable_tray":
             mesh = make_cable_tray(params)
         elif model == "vesa_adapter":
@@ -310,17 +268,16 @@ def generate(req: GenerateReq):
         if not stl_bytes:
             raise HTTPException(500, "STL vacío")
 
-        # --- RUTA NORMALIZADA (kebab-case) ---
-        folder = slug_folder(model)                 # p.ej. "cable-tray"
-        fname = f"{folder}/{uuid.uuid4().hex}.stl"  # forge-stl/<folder>/<uuid>.stl
+        folder = slug_folder(model)                   # p.ej. "cable-tray"
+        fname = f"{folder}/{uuid.uuid4().hex}.stl"    # forge-stl/<folder>/<uuid>.stl
+        print(f"[generate] put/sign path='{fname}'")
 
         stl_url = upload_to_supabase(fname, stl_bytes)
-        return {"status": "ok", "stl_url": stl_url, "model": model}
+        return {"status": "ok", "stl_url": stl_url, "model": model, "path": fname}
 
     except HTTPException:
         raise
     except TypeError as te:
-        # Imprime params para cazarlos al vuelo
         print(f"[generate][TypeError] model={req.model} params={params}")
         raise HTTPException(status_code=500, detail=str(te))
     except Exception as e:
