@@ -18,19 +18,12 @@ from models.cable_clip import make_model as make_cable_clip
 # --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
+SUPABASE_PUBLIC_READ = os.environ.get("SUPABASE_PUBLIC_READ", "false").lower() in ("1", "true", "yes")
 
-def _clean_bucket(name: str) -> str:
-    name = (name or "").strip()
-    if name.startswith("/"): name = name[1:]
-    if name.endswith("/"): name = name[:-1]
-    return name
-
-SUPABASE_BUCKET = _clean_bucket(os.environ.get("SUPABASE_BUCKET", "forge-stl"))
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("[WARN] Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY")
-print(f"[cfg] bucket='{SUPABASE_BUCKET}' url='{SUPABASE_URL}'")
 
-# --------- APP ---------
 app = FastAPI(title="Teknovashop Forge")
 
 # --------- MODELOS/SCHEMAS ---------
@@ -59,36 +52,45 @@ class GenerateReq(BaseModel):
     holes: Optional[List[HoleSpec]] = None
     thickness_mm: Optional[float] = None
     ventilated: Optional[bool] = True
+
     # Cable tray
     width_mm: Optional[float] = None
     height_mm: Optional[float] = None
     length_mm: Optional[float] = None
+
     # VESA
     vesa_mm: Optional[float] = None
     clearance_mm: Optional[float] = None
     hole_diameter_mm: Optional[float] = None
+
     # Router
     router_width_mm: Optional[float] = None
     router_depth_mm: Optional[float] = None
+
     # Phone stand
     angle_deg: Optional[float] = None
     support_depth: Optional[float] = None
     width: Optional[float] = None
+
     # QR plate
     slot_mm: Optional[float] = None
     screw_d_mm: Optional[float] = None
+
     # Enclosure
     wall_mm: Optional[float] = None
     box_length: Optional[float] = None
     box_width: Optional[float] = None
     box_height: Optional[float] = None
+
     # Cable clip
     clip_diameter: Optional[float] = None
     clip_width: Optional[float] = None
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "ts": int(time.time())}
+
 
 # ---------- helpers ----------
 def _as_float(x: Any, default: float = 0.0) -> float:
@@ -96,6 +98,7 @@ def _as_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return float(default)
+
 
 def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
     if not isinstance(d, dict):
@@ -107,21 +110,28 @@ def _hole_dict_to_tuple(d: dict) -> Optional[Tuple[float, float, float]]:
         return None
     return (_as_float(x), _as_float(z), _as_float(dval))
 
+
 def _sanitize(value: Any, context_key: str = "") -> Any:
     if isinstance(value, dict):
         as_hole = _hole_dict_to_tuple(value)
         if as_hole is not None:
             return as_hole
         return {k: _sanitize(v, f"{context_key}.{k}" if context_key else k) for k, v in value.items()}
+
     if isinstance(value, (list, tuple)):
-        out = [ _sanitize(item, f"{context_key}[{i}]") for i, item in enumerate(value) ]
+        out = []
+        for i, item in enumerate(value):
+            out.append(_sanitize(item, f"{context_key}[{i}]"))
         return tuple(out) if isinstance(value, tuple) else out
+
     if isinstance(value, bool):
         return value
+
     try:
         return _as_float(value)
     except Exception:
         return value
+
 
 def _params_debug_types(d: dict) -> dict:
     def t(v: Any) -> str:
@@ -130,50 +140,58 @@ def _params_debug_types(d: dict) -> dict:
         return type(v).__name__
     return {k: t(v) for k, v in d.items()}
 
-def slug_folder(model_name: str) -> str:
-    import re
-    s = (model_name or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return s
 
-def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
+def upload_to_supabase(path: str, content: bytes, content_type="application/octet-stream") -> str:
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(500, "Supabase no configurado")
 
-    path = path.lstrip("/")
+    path = path.lstrip("/")  # sin slash inicial
+    print(f"[upload] bucket='{SUPABASE_BUCKET}' put path='{path}'")
+
+    # 1) subir
     put_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": content_type,
         "X-Upsert": "true",
     }
-    r = httpx.put(put_url, headers=headers, content=content, timeout=30)
+    r = httpx.put(put_url, headers=headers, content=content, timeout=60)
     if r.status_code not in (200, 201):
+        print("[upload][error]", r.status_code, r.text)
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
+    # Si el bucket es público, devolvemos URL pública directa
+    if SUPABASE_PUBLIC_READ:
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+        print(f"[upload] public URL -> {public_url}")
+        return public_url
+
+    # 2) firmar
     sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
+    print(f"[upload] sign path='{path}'")
     r2 = httpx.post(
         sign_url,
-        headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+        },
         json={"expiresIn": 3600},
         timeout=30,
     )
     if r2.status_code != 200:
+        print("[sign][error]", r2.status_code, r2.text)
         raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
 
     data = r2.json()
-    signed = data.get("signedURL") or data.get("signedUrl")
-    if not signed:
+    signed_rel = data.get("signedURL") or data.get("signedUrl")
+    if not signed_rel:
+        print("[sign][error] missing signedURL key", data)
         raise HTTPException(500, "No signedURL in Supabase response")
 
-    # Forzar descarga con nombre de archivo
-    from urllib.parse import urlencode
-    filename = os.path.basename(path) or "forge.stl"
-    sep = "&" if "?" in signed else "?"
-    signed_with_download = f"{signed}{sep}{urlencode({'download': filename})}"
+    signed_full = f"{SUPABASE_URL}{signed_rel}"
+    print(f"[upload] signed URL -> {signed_full}")
+    return signed_full
 
-    return f"{SUPABASE_URL}{signed_with_download}"
 
 @app.post("/generate")
 def generate(req: GenerateReq):
@@ -208,8 +226,10 @@ def generate(req: GenerateReq):
             angle_val = req.angle_deg or 60
             depth_val = req.support_depth or 110
             params = dict(
-                angle_deg=angle_val, angle=angle_val,
-                support_depth=depth_val, depth=depth_val,
+                angle_deg=angle_val,
+                angle=angle_val,
+                support_depth=depth_val,
+                depth=depth_val,
                 width=req.width or 80,
                 thickness=req.thickness_mm or 4,
             )
@@ -240,12 +260,11 @@ def generate(req: GenerateReq):
             raise HTTPException(400, "Modelo no soportado")
 
         params = _sanitize(params, model)
-
         print(f"[generate] bucket='{SUPABASE_BUCKET}' model={model} types={_params_debug_types(params)}")
-        if isinstance(params, dict) and "holes" in params and (params.get("holes") or []):
+        if isinstance(params, dict) and params.get("holes"):
             print(f"[generate] holes[0] sample={repr(params['holes'][0])} type={type(params['holes'][0]).__name__}")
 
-        # Maker
+        # make
         if model == "cable_tray":
             mesh = make_cable_tray(params)
         elif model == "vesa_adapter":
@@ -263,22 +282,22 @@ def generate(req: GenerateReq):
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Export STL
         stl_bytes: bytes = mesh.export(file_type="stl")
         if not stl_bytes:
             raise HTTPException(500, "STL vacío")
 
-        folder = slug_folder(model)                   # p.ej. "cable-tray"
-        fname = f"{folder}/{uuid.uuid4().hex}.stl"    # forge-stl/<folder>/<uuid>.stl
+        # carpeta por modelo (guiones bajos o medios válidos)
+        folder = model.replace(" ", "-")
+        fname = f"{folder}/{uuid.uuid4().hex}.stl"
         print(f"[generate] put/sign path='{fname}'")
 
-        stl_url = upload_to_supabase(fname, stl_bytes)
-        return {"status": "ok", "stl_url": stl_url, "model": model, "path": fname}
+        stl_url = upload_to_supabase(fname, stl_bytes, content_type="application/sla")  # STL mime
+        return {"status": "ok", "stl_url": stl_url, "model": model}
 
     except HTTPException:
         raise
     except TypeError as te:
-        print(f"[generate][TypeError] model={req.model} params={params}")
+        print(f"[generate][TypeError] model={req.model}")
         raise HTTPException(status_code=500, detail=str(te))
     except Exception as e:
         print("ERROR generate:", repr(e))
