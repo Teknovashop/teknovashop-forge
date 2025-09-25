@@ -1,91 +1,64 @@
-# apps/stl-service/_helpers.py
+# apps/stl-service/models/_helpers.py
 from __future__ import annotations
+from typing import Any, List, Tuple, Optional
 
-import os
-import io
-import typing as t
+Number = float
+Hole = Tuple[Number, Number, Number]  # (x_mm, z_mm, d_mm)
 
-from supabase import create_client, Client  # supabase-py v2
+def _as_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
 
-# -------------------------------------------------------------------
-#  Supabase client (Service Role) – se crea una única vez por proceso
-# -------------------------------------------------------------------
-
-_SUPABASE: Client | None = None
-
-
-def get_supabase() -> Client:
-    global _SUPABASE
-    if _SUPABASE is None:
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_SERVICE_KEY")  # SERVICE ROLE KEY (no la anon)
-        if not url or not key:
-            raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_KEY en el entorno")
-        _SUPABASE = create_client(url, key)
-    return _SUPABASE
-
-
-def get_bucket_name() -> str:
-    return os.environ.get("SUPABASE_BUCKET", "forge-stl")
-
-
-# -------------------------------------------------------------------
-#  Subida y firma de STL
-# -------------------------------------------------------------------
-
-def upload_and_sign_stl(
-    *,
-    path: str,
-    data: bytes | io.BytesIO | memoryview,
-    content_type: str = "model/stl",
-    expires_seconds: int = 60 * 60,
-) -> str:
+def _hole_from(obj: Any) -> Optional[Hole]:
     """
-    Sube el binario a Storage y devuelve una URL firmada temporal.
-    - path: 'modelo_underscored/uuid.stl' (SIN barra inicial)
-    - data: bytes del STL
+    Normaliza distintos formatos de agujero a una tupla (x_mm, z_mm, d_mm).
+    Acepta:
+      - (x, z, d) / [x, z, d]
+      - {"x_mm":..,"z_mm":..,"d_mm":..}  (o "x","z","d"/"diameter")
     """
-    sb = get_supabase()
-    bucket = get_bucket_name()
-    storage = sb.storage
+    if obj is None:
+        return None
 
-    # normalizamos la ruta (sin barra inicial)
-    path = path.lstrip("/")
+    if isinstance(obj, (list, tuple)) and len(obj) >= 3:
+        x, z, d = obj[0], obj[1], obj[2]
+        return (_as_float(x), _as_float(z), _as_float(d))
 
-    # convertimos stream a bytes si hace falta
-    if hasattr(data, "getvalue"):
-        data = t.cast(io.BytesIO, data).getvalue()
-    elif isinstance(data, memoryview):
-        data = data.tobytes()
+    if isinstance(obj, dict):
+        x = obj.get("x_mm", obj.get("x"))
+        z = obj.get("z_mm", obj.get("z"))
+        d = obj.get("d_mm", obj.get("d") or obj.get("diameter"))
+        if x is None or z is None or d is None:
+            return None
+        return (_as_float(x), _as_float(z), _as_float(d))
 
-    print(f"[upload] bucket='{bucket}' put path='{path}'")
-    # IMPORTANTE: upsert=True y contentType
-    storage.from_(bucket).upload(
-        path,
-        data,  # bytes
-        {"contentType": content_type, "upsert": True},
-    )
+    return None
 
-    print(f"[upload] sign path='{path}'")
-    signed = storage.from_(bucket).create_signed_url(path, expires_seconds)
+def parse_holes(params: dict, key: str = "holes") -> List[Hole]:
+    """
+    Extrae y normaliza la lista de agujeros desde params[key].
+    Devuelve una lista de tuplas (x_mm, z_mm, d_mm).
+    """
+    raw = params.get(key, [])
+    out: List[Hole] = []
 
-    # la librería puede devolver distintas formas según versión
-    # intentamos obtener la URL de manera robusta:
-    url: str | None = None
-    if isinstance(signed, dict):
-        url = (
-            signed.get("signedURL")
-            or signed.get("signed_url")
-            or (signed.get("data") or {}).get("signedURL")
-            or (signed.get("data") or {}).get("signed_url")
-        )
-    if not url:
-        # algunas versiones devuelven str directamente
-        if isinstance(signed, str):
-            url = signed
+    # Por si llega un contenedor {'items':[...]} o {'data':[...]}
+    if isinstance(raw, dict):
+        raw = raw.get("items") or raw.get("data") or []
 
-    if not url:
-        raise RuntimeError(f"No se pudo obtener URL firmada para '{path}' (respuesta: {signed!r})")
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            h = _hole_from(item)
+            if h:
+                out.append(h)
 
-    print(f"[upload] signed URL -> {url}")
-    return url
+    return out
+
+# Utilidades genéricas que usan algunos modelos
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(v)))
+
+def mm(x: Any) -> float:
+    """Alias para convertir a float (mm)."""
+    return _as_float(x)
