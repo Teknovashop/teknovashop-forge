@@ -1,4 +1,4 @@
-# apps/stl-service/app.py
+# teknovashop-forge/app.py
 import os, uuid, time
 from typing import List, Literal, Optional, Any, Tuple
 
@@ -14,7 +14,9 @@ from models.phone_stand import make_model as make_phone_stand
 from models.qr_plate import make_model as make_qr_plate
 from models.enclosure_ip65 import make_model as make_enclosure_ip65
 from models.cable_clip import make_model as make_cable_clip
-from models.vesa_shelf import make_model as make_vesa_shelf  # NUEVO
+
+# Normalizador de agujeros (x_mm, z_mm, d_mm) -> tupla
+from models._helpers import parse_holes  # <<=== IMPORTANTE
 
 # --------- ENV SUPABASE ---------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -46,7 +48,6 @@ ModelKind = Literal[
     "qr_plate",
     "enclosure_ip65",
     "cable_clip",
-    "vesa_shelf",
 ]
 
 class GenerateReq(BaseModel):
@@ -60,18 +61,14 @@ class GenerateReq(BaseModel):
     height_mm: Optional[float] = None
     length_mm: Optional[float] = None
 
-    # VESA adapter
+    # VESA
     vesa_mm: Optional[float] = None
     clearance_mm: Optional[float] = None
     hole_diameter_mm: Optional[float] = None
-    vesa_pattern_mm: Optional[float] = None
-    vesa_hole_d_mm: Optional[float] = None
 
-    # Router mount
+    # Router
     router_width_mm: Optional[float] = None
     router_depth_mm: Optional[float] = None
-    width_mm_alt: Optional[float] = None  # fallback si nos llega como width_mm
-    depth_mm_alt: Optional[float] = None  # fallback
 
     # Phone stand
     angle_deg: Optional[float] = None
@@ -91,11 +88,6 @@ class GenerateReq(BaseModel):
     # Cable clip
     clip_diameter: Optional[float] = None
     clip_width: Optional[float] = None
-
-    # VESA shelf
-    shelf_width_mm: Optional[float] = None
-    shelf_depth_mm: Optional[float] = None
-    lip_height_mm: Optional[float] = None
 
 
 @app.get("/health")
@@ -152,18 +144,14 @@ def _params_debug_types(d: dict) -> dict:
     return {k: t(v) for k, v in d.items()}
 
 
-def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> str:
-    """
-    Sube primero y después firma la URL (si el bucket no es público).
-    Usa el API REST de Supabase Storage (sin SDK).
-    """
+def upload_to_supabase(path: str, content: bytes, content_type="application/octet-stream") -> str:
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(500, "Supabase no configurado")
 
     path = path.lstrip("/")  # sin slash inicial
     print(f"[upload] bucket='{SUPABASE_BUCKET}' put path='{path}'")
 
-    # 1) SUBIR (upsert)
+    # 1) subir
     put_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{path}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -175,18 +163,21 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
         print("[upload][error]", r.status_code, r.text)
         raise HTTPException(500, f"Supabase upload error: {r.status_code} {r.text}")
 
-    # 2) URL pública directa si el bucket está marcado como público
+    # Si el bucket es público, devolvemos URL pública directa
     if SUPABASE_PUBLIC_READ:
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
         print(f"[upload] public URL -> {public_url}")
         return public_url
 
-    # 3) FIRMAR (1h)
+    # 2) firmar
     sign_url = f"{SUPABASE_URL}/storage/v1/object/sign/{SUPABASE_BUCKET}/{path}"
-    print(f"[upload] sign path='{path}' -> {sign_url}")
+    print(f"[upload] sign path='{path}'")
     r2 = httpx.post(
         sign_url,
-        headers={"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+        },
         json={"expiresIn": 3600},
         timeout=30,
     )
@@ -195,7 +186,6 @@ def upload_to_supabase(path: str, content: bytes, content_type="model/stl") -> s
         raise HTTPException(500, f"Supabase sign error: {r2.status_code} {r2.text}")
 
     data = r2.json()
-    # La API puede devolver signedURL o signedUrl
     signed_rel = data.get("signedURL") or data.get("signedUrl")
     if not signed_rel:
         print("[sign][error] missing signedURL key", data)
@@ -211,7 +201,6 @@ def generate(req: GenerateReq):
     try:
         model = req.model
 
-        # ---- Mapeo de parámetros por modelo (admite variantes) ----
         if model == "cable_tray":
             params = dict(
                 width=req.width_mm or 60,
@@ -221,36 +210,32 @@ def generate(req: GenerateReq):
                 ventilated=bool(req.ventilated),
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "vesa_adapter":
             params = dict(
-                vesa_mm=req.vesa_mm or req.vesa_pattern_mm or 100,
+                vesa_mm=req.vesa_mm or 100,
                 thickness=req.thickness_mm or 4,
                 clearance=req.clearance_mm or 1,
-                hole=req.hole_diameter_mm or req.vesa_hole_d_mm or 5,
+                hole=req.hole_diameter_mm or 5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "router_mount":
             params = dict(
-                router_width=req.router_width_mm or req.width_mm_alt or 120,
-                router_depth=req.router_depth_mm or req.depth_mm_alt or 80,
+                router_width=req.router_width_mm or 120,
+                router_depth=req.router_depth_mm or 80,
                 thickness=req.thickness_mm or 4,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "phone_stand":
             angle_val = req.angle_deg or 60
             depth_val = req.support_depth or 110
             params = dict(
                 angle_deg=angle_val,
-                angle=angle_val,           # por compatibilidad
+                angle=angle_val,
                 support_depth=depth_val,
-                depth=depth_val,           # por compatibilidad
+                depth=depth_val,
                 width=req.width or 80,
                 thickness=req.thickness_mm or 4,
             )
-
         elif model == "qr_plate":
             params = dict(
                 length=req.length_mm or 90,
@@ -260,7 +245,6 @@ def generate(req: GenerateReq):
                 screw_d_mm=req.screw_d_mm or 6.5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "enclosure_ip65":
             params = dict(
                 length=req.box_length or req.length_mm or 201,
@@ -269,36 +253,28 @@ def generate(req: GenerateReq):
                 wall=req.wall_mm or req.thickness_mm or 5,
                 holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
             )
-
         elif model == "cable_clip":
             params = dict(
                 diameter=req.clip_diameter or 8,
                 width=req.clip_width or 12,
                 thickness=req.thickness_mm or 2.4,
             )
-
-        elif model == "vesa_shelf":
-            params = dict(
-                vesa_mm=req.vesa_mm or req.vesa_pattern_mm or 100,
-                thickness=req.thickness_mm or 5,
-                shelf_width=req.shelf_width_mm or 220,
-                shelf_depth=req.shelf_depth_mm or 160,
-                lip_height=req.lip_height_mm or 10,
-                vesa_hole_d=req.vesa_hole_d_mm or 5,
-                holes=[h.model_dump() if hasattr(h, "model_dump") else h for h in (req.holes or [])],
-            )
-
         else:
             raise HTTPException(400, "Modelo no soportado")
 
-        # Normaliza números y agujeros -> tuplas (x,z,d)
+        # Normalizamos tipos básicos
         params = _sanitize(params, model)
+
+        # *** NORMALIZACIÓN CRÍTICA DE AGUJEROS ***
+        # Pase lo que llegue (dicts, listas, tuplas), lo convertimos a List[Tuple[x,z,d]]
+        if isinstance(params, dict) and "holes" in params:
+            params["holes"] = parse_holes({"holes": params["holes"]})
+
         print(f"[generate] bucket='{SUPABASE_BUCKET}' model={model} types={_params_debug_types(params)}")
         if isinstance(params, dict) and params.get("holes"):
-            first = params["holes"][0]
-            print(f"[generate] holes[0] sample={repr(first)} type={type(first).__name__}")
+            print(f"[generate] holes[0] sample={repr(params['holes'][0])} type={type(params['holes'][0]).__name__}")
 
-        # -------------- Build --------------
+        # make
         if model == "cable_tray":
             mesh = make_cable_tray(params)
         elif model == "vesa_adapter":
@@ -313,8 +289,6 @@ def generate(req: GenerateReq):
             mesh = make_enclosure_ip65(params)
         elif model == "cable_clip":
             mesh = make_cable_clip(params)
-        elif model == "vesa_shelf":
-            mesh = make_vesa_shelf(params)
         else:
             raise HTTPException(400, "Modelo no soportado")
 
@@ -322,19 +296,19 @@ def generate(req: GenerateReq):
         if not stl_bytes:
             raise HTTPException(500, "STL vacío")
 
-        # carpeta por modelo
+        # carpeta por modelo (guiones bajos o medios válidos)
         folder = model.replace(" ", "-")
         fname = f"{folder}/{uuid.uuid4().hex}.stl"
         print(f"[generate] put/sign path='{fname}'")
 
-        stl_url = upload_to_supabase(fname, stl_bytes, content_type="model/stl")
+        stl_url = upload_to_supabase(fname, stl_bytes, content_type="application/sla")  # STL mime
         return {"status": "ok", "stl_url": stl_url, "model": model}
 
     except HTTPException:
         raise
     except TypeError as te:
-        print(f"[generate][TypeError] model={req.model} -> {te}")
+        print(f"[generate][TypeError] model={req.model}")
         raise HTTPException(status_code=500, detail=str(te))
     except Exception as e:
-        print("[generate][ERROR]", repr(e))
+        print(f"[generate][ERROR] {repr(e)}")
         raise HTTPException(status_code=500, detail=str(e))
