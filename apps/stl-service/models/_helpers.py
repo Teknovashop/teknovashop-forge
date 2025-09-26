@@ -1,64 +1,52 @@
 # apps/stl-service/models/_helpers.py
-from __future__ import annotations
-from typing import Any, List, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Tuple
 
-Number = float
-Hole = Tuple[Number, Number, Number]  # (x_mm, z_mm, d_mm)
-
-def _as_float(x: Any, default: float = 0.0) -> float:
+def as_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
     except Exception:
         return float(default)
 
-def _hole_from(obj: Any) -> Optional[Hole]:
+def hole_to_dict(h: Any) -> Dict[str, float]:
     """
-    Normaliza distintos formatos de agujero a una tupla (x_mm, z_mm, d_mm).
+    Devuelve SIEMPRE un dict {x_mm, z_mm, d_mm}.
     Acepta:
-      - (x, z, d) / [x, z, d]
-      - {"x_mm":..,"z_mm":..,"d_mm":..}  (o "x","z","d"/"diameter")
+      - dict con x_mm/x, z_mm/z, d_mm/d/diameter
+      - tuple/list (x, z, d)
+      - objetos con atributos x_mm, z_mm, d_mm
     """
-    if obj is None:
-        return None
+    if isinstance(h, (list, tuple)) and len(h) >= 3:
+        return {"x_mm": as_float(h[0]), "z_mm": as_float(h[1]), "d_mm": as_float(h[2])}
+    if isinstance(h, dict):
+        x = h.get("x_mm", h.get("x"))
+        z = h.get("z_mm", h.get("z"))
+        d = h.get("d_mm", h.get("d", h.get("diameter")))
+        return {"x_mm": as_float(x), "z_mm": as_float(z), "d_mm": as_float(d)}
+    # Pydantic u objeto con atributos
+    if hasattr(h, "x_mm") and hasattr(h, "z_mm") and hasattr(h, "d_mm"):
+        return {
+            "x_mm": as_float(getattr(h, "x_mm")),
+            "z_mm": as_float(getattr(h, "z_mm")),
+            "d_mm": as_float(getattr(h, "d_mm")),
+        }
+    # Valor raro: devolvemos dict vacío para no romper
+    return {"x_mm": 0.0, "z_mm": 0.0, "d_mm": 0.0}
 
-    if isinstance(obj, (list, tuple)) and len(obj) >= 3:
-        x, z, d = obj[0], obj[1], obj[2]
-        return (_as_float(x), _as_float(z), _as_float(d))
-
-    if isinstance(obj, dict):
-        x = obj.get("x_mm", obj.get("x"))
-        z = obj.get("z_mm", obj.get("z"))
-        d = obj.get("d_mm", obj.get("d") or obj.get("diameter"))
-        if x is None or z is None or d is None:
-            return None
-        return (_as_float(x), _as_float(z), _as_float(d))
-
-    return None
-
-def parse_holes(params: dict, key: str = "holes") -> List[Hole]:
+def parse_holes(holes_in: Any) -> List[Dict[str, float]]:
     """
-    Extrae y normaliza la lista de agujeros desde params[key].
-    Devuelve una lista de tuplas (x_mm, z_mm, d_mm).
+    Normaliza 'holes' (lo que venga) a una LISTA DE DICCIONARIOS.
+    Nunca devuelve None; si no hay agujeros, devuelve [].
     """
-    raw = params.get(key, [])
-    out: List[Hole] = []
-
-    # Por si llega un contenedor {'items':[...]} o {'data':[...]}
-    if isinstance(raw, dict):
-        raw = raw.get("items") or raw.get("data") or []
-
-    if isinstance(raw, (list, tuple)):
-        for item in raw:
-            h = _hole_from(item)
-            if h:
-                out.append(h)
-
-    return out
-
-# Utilidades genéricas que usan algunos modelos
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, float(v)))
-
-def mm(x: Any) -> float:
-    """Alias para convertir a float (mm)."""
-    return _as_float(x)
+    if holes_in is None:
+        return []
+    # Si por error llega un dict de un solo agujero
+    if isinstance(holes_in, dict) and {"x_mm","z_mm","d_mm"} & holes_in.keys():
+        return [hole_to_dict(holes_in)]
+    # Iterable (lista/tupla)
+    if isinstance(holes_in, (list, tuple)):
+        out: List[Dict[str, float]] = []
+        for h in holes_in:
+            out.append(hole_to_dict(h))
+        return out
+    # Cualquier otra cosa
+    return []
