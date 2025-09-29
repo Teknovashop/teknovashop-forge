@@ -4,6 +4,6 @@ numpy==1.26.4
 shapely==2.0.3
 trimesh==4.4.3
 
-# Cliente Supabase estable (evita conflicto 'proxy' con httpx)
+# Supabase SDK + httpx compatible con 'proxy'
 supabase==2.4.0
-httpx==0.24.1
+httpx>=0.27.0,<0.29
