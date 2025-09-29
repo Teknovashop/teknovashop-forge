@@ -4,12 +4,6 @@ numpy==1.26.4
 shapely==2.0.3
 trimesh==4.4.3
 
-# Supabase stack – versiones compatibles entre sí
+# Cliente Supabase estable (evita conflicto 'proxy' con httpx)
 supabase==2.4.0
-gotrue==2.4.2
-postgrest==0.11.6
-storage3==0.7.4
-realtime==2.0.1
-
-# httpx fijado para evitar el error 'proxy'
 httpx==0.24.1
