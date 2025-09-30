@@ -1,72 +1,172 @@
+# app/app.py
 import io
 import os
-from typing import List, Optional, Literal, Dict, Any
+import sys
+import traceback
+from typing import List, Optional, Callable, Dict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
 import trimesh
-from trimesh.creation import box
+from trimesh.creation import box, cylinder
 
+# ---- Supabase helpers (tuyos) ----
 from supabase_client import upload_and_get_url
-from apps.stl-service.models import REGISTRY  # del repo que subiste
-from apps.stl-service.models._ops import cut_hole, cut_box, round_edges_box
 
-# --------- Config ---------
-CORS_ALLOW_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
-if not CORS_ALLOW_ORIGINS:
-    CORS_ALLOW_ORIGINS = ["*"]
+# ============================================================
+#  Carga tolerante de REGISTRY desde apps/stl-service/models.py
+#  (sin renombrar la carpeta con guion)
+# ============================================================
 
+def _load_registry() -> Dict[str, Callable]:
+    """
+    Intenta importar REGISTRY de:
+      1) apps.stl_service.models (por si también existe)
+      2) apps/stl-service/models.py mediante import por ruta
+    Si falla, devuelve un REGISTRY local mínimo.
+    """
+    # 1) Intento normal (por si existe un espejo con underscore)
+    try:
+        from apps.stl_service.models import REGISTRY as REG_UNDERSCORE  # type: ignore
+        return REG_UNDERSCORE
+    except Exception:
+        pass
+
+    # 2) Importar por ruta absoluta sin depender del nombre del paquete
+    try:
+        import importlib.util
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        models_path = os.path.join(base_dir, "apps", "stl-service", "models.py")
+        if os.path.isfile(models_path):
+            spec = importlib.util.spec_from_file_location("stl_service_models", models_path)
+            assert spec and spec.loader, "spec inválida al cargar models.py"
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["stl_service_models"] = mod
+            spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+            if hasattr(mod, "REGISTRY") and isinstance(mod.REGISTRY, dict):
+                return mod.REGISTRY  # type: ignore
+    except Exception:
+        # Logueamos, pero seguimos vivos
+        print("[WARN] No se pudo importar REGISTRY de apps/stl-service/models.py")
+        traceback.print_exc()
+
+    # 3) REGISTRY local por defecto (tres modelos básicos)
+    def _build_cable_tray(p: dict, holes: List[dict]) -> trimesh.Trimesh:
+        L, W, H = p["length_mm"], p["width_mm"], p["height_mm"]
+        solid = box(extents=(L, W, H))
+        solid.apply_translation((0, 0, H / 2.0))
+        return _apply_holes(solid, holes, L, H)
+
+    def _build_vesa_adapter(p: dict, holes: List[dict]) -> trimesh.Trimesh:
+        # Bloque más fino + taladros
+        L, W, H = p["length_mm"], p["width_mm"], p["height_mm"]
+        H = max(H, 5.0)
+        solid = box(extents=(L, W, H))
+        solid.apply_translation((0, 0, H / 2.0))
+        return _apply_holes(solid, holes, L, H)
+
+    def _build_router_mount(p: dict, holes: List[dict]) -> trimesh.Trimesh:
+        # Base simple; luego taladros
+        L, W, H = p["length_mm"], p["width_mm"], p["height_mm"]
+        solid = box(extents=(L, W, H))
+        solid.apply_translation((0, 0, H / 2.0))
+        return _apply_holes(solid, holes, L, H)
+
+    return {
+        "cable_tray": _build_cable_tray,
+        "vesa_adapter": _build_vesa_adapter,
+        "router_mount": _build_router_mount,
+    }
+
+def _apply_holes(solid: trimesh.Trimesh, holes: List[dict], L: float, H: float) -> trimesh.Trimesh:
+    """
+    Aplica taladros verticales (desde la tapa superior). Usa boolean difference.
+    Si Manifold3D no está, intentamos con trimesh; si tampoco, devolvemos la pieza sin taladrar.
+    """
+    # Intento con manifold3d si existe
+    try:
+        import manifold3d  # noqa: F401  # solo comprobación
+        use_manifold = True
+    except Exception:
+        use_manifold = False
+        print("[WARN] Boolean difference no disponible: No module named 'manifold3d'")
+
+    for h in holes or []:
+        d_mm = float(h.get("d_mm", 0) or 0)
+        if d_mm <= 0:
+            continue
+        r = max(0.1, d_mm / 2.0)
+        # UI manda x_mm en [0..L]; lo convertimos a coordenada centrada
+        cx = float(h.get("x_mm", 0.0)) - (L / 2.0)
+        cz = H  # perforando hacia abajo
+        drill = cylinder(radius=r, height=max(H * 2.0, 50.0), sections=48)
+        # Trimesh: cilindro a lo largo de Z y centrado en origen -> lo subimos
+        drill.apply_translation((cx, 0.0, cz))
+
+        try:
+            if use_manifold and hasattr(solid, "difference"):
+                # Si la lib Manifold está conectada a trimesh en tu entorno
+                solid = solid.difference(drill)
+            else:
+                # Fallback de trimesh (puede requerir CGAL/SCAD; si falla seguimos)
+                if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
+                    solid = solid.difference(drill, engine="scad")
+                else:
+                    solid = solid.difference(drill)
+        except Exception:
+            # No rompemos la generación por un taladro que falle
+            print("[WARN] Falló un boolean difference; seguimos sin ese agujero.")
+            traceback.print_exc()
+    return solid
+
+REGISTRY: Dict[str, Callable] = _load_registry()
+
+# ============================================================
+#               Config FastAPI + CORS
+# ============================================================
+
+CORS_ALLOW_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()] or ["*"]
 BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
 PUBLIC_READ = os.getenv("SUPABASE_PUBLIC_READ", "0") == "1"
+SIGNED_EXPIRES = int(os.getenv("SIGNED_URL_EXPIRES", "3600"))
 
-# --------- Tipos ---------
 class Hole(BaseModel):
     x_mm: float
-    y_mm: float = 0.0  # añadimos Y (antes sólo x,z)
-    z_mm: float
+    z_mm: float | None = 0
     d_mm: float
-    axis: Literal["x", "y", "z"] = "z"  # dirección del taladro
-
-class Cut(BaseModel):
-    cx_mm: float
-    cy_mm: float
-    cz_mm: float
-    sx_mm: float
-    sy_mm: float
-    sz_mm: float
-
-class Ops(BaseModel):
-    holes: List[Hole] = []
-    cuts: List[Cut] = []
-    round_radius_mm: float = 0.0  # fillet simple para modelos de caja
 
 class Params(BaseModel):
-    # parámetros genéricos; cada modelo puede esperar otros,
-    # pero aceptamos un dict libre y lo pasamos a su "make".
-    # Añadimos long/width/height por compatibilidad con tu UI actual:
-    length_mm: Optional[float] = Field(default=None, gt=0)
-    width_mm: Optional[float] = Field(default=None, gt=0)
-    height_mm: Optional[float] = Field(default=None, gt=0)
-    thickness_mm: Optional[float] = Field(default=None, gt=0)
-
-    extra: Dict[str, Any] = Field(default_factory=dict)
+    length_mm: float = Field(..., gt=0)
+    width_mm: float = Field(..., gt=0)
+    height_mm: float = Field(..., gt=0)
+    thickness_mm: Optional[float] = Field(default=3, gt=0)
 
 class GenerateReq(BaseModel):
-    model: str = Field(..., description="id de modelo, p.ej. cable_tray | vesa_adapter | router_mount | ...")
+    model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | ...")
     params: Params
-    ops: Ops = Ops()
+    holes: Optional[List[Hole]] = []
+
+    @validator("holes", pre=True)
+    def _coerce(cls, v):
+        if v is None:
+            return []
+        out = []
+        for h in v:
+            out.append(
+                {
+                    "x_mm": float(h.get("x_mm", 0.0)),
+                    "z_mm": float(h.get("z_mm", 0.0)),
+                    "d_mm": float(h.get("d_mm", 0.0)),
+                }
+            )
+        return out
 
 class GenerateRes(BaseModel):
     stl_url: str
     object_key: str
 
-class ModelInfo(BaseModel):
-    id: str
-    defaults: Dict[str, Any]
-
-# --------- App ---------
 app = FastAPI(title="Teknovashop Forge")
 
 app.add_middleware(
@@ -79,71 +179,52 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "models": list(REGISTRY.keys())}
 
-@app.get("/models", response_model=List[ModelInfo])
-def models():
-    out = []
-    for mid, meta in REGISTRY.items():
-        out.append({"id": mid, "defaults": meta.get("defaults", {})})
-    return out
-
-def _apply_ops(mesh: trimesh.Trimesh, ops: Ops) -> trimesh.Trimesh:
-    out = mesh
-    # Redondeo simple si el mesh es una “caja”: intentamos detectar por bounding box
-    if ops.round_radius_mm and isinstance(mesh, trimesh.Trimesh):
-        L, W, H = (mesh.bounds[1] - mesh.bounds[0]).tolist()
-        # Re-construimos como caja-fillete con mismas extents (esto es opcional y documentado)
-        out = round_edges_box((L, W, H), ops.round_radius_mm)
-
-    # Agujeros
-    for h in (ops.holes or []):
-        out = cut_hole(out, h.x_mm, h.y_mm, h.z_mm, h.d_mm, axis=h.axis)
-
-    # Cortes rectangulares
-    for c in (ops.cuts or []):
-        out = cut_box(out, (c.cx_mm, c.cy_mm, c.cz_mm), (c.sx_mm, c.sy_mm, c.sz_mm))
-
-    return out
+def _export_stl(mesh_or_scene: trimesh.Trimesh | trimesh.Scene) -> bytes:
+    data = mesh_or_scene.export(file_type="stl")
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
-    mid = req.model
-    meta = REGISTRY.get(mid)
-    if not meta:
-        raise RuntimeError(f"Modelo '{mid}' no encontrado. Usa /models para ver los disponibles.")
+    p = {
+        "length_mm": req.params.length_mm,
+        "width_mm": req.params.width_mm,
+        "height_mm": req.params.height_mm,
+        "thickness_mm": req.params.thickness_mm or 3.0,
+    }
 
-    # Construir base usando el make del registro
-    make = meta["make"]
-    # Combinamos params “planos” + extra para dar libertad
-    param_dict = {k: v for k, v in req.params.dict().items() if k not in ("extra",) and v is not None}
-    param_dict.update(req.params.extra or {})
+    # normalizamos nombres con guion/underscore
+    model_key_variants = {
+        req.model,
+        req.model.replace("-", "_"),
+        req.model.replace("_", "-"),
+    }
 
-    base_mesh = make(param_dict)  # los make_* del repo devuelven trimesh.Trimesh o Scene
+    builder = None
+    for k in model_key_variants:
+        if k in REGISTRY:
+            builder = REGISTRY[k]
+            break
+    if builder is None:
+        # último intento: claves en lower
+        for k in model_key_variants:
+            kk = k.lower()
+            if kk in REGISTRY:
+                builder = REGISTRY[kk]
+                break
 
-    # Normalizamos a Trimesh (si viene Scene con un solo geom)
-    if isinstance(base_mesh, trimesh.Scene):
-        geoms = list(base_mesh.geometry.values())
-        if not geoms:
-            raise RuntimeError("El modelo generó una escena vacía.")
-        base_mesh = geoms[0].copy()
+    if builder is None:
+        raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
 
-    # Centrado + elevación en Z
-    bb = base_mesh.bounds
-    H = (bb[1][2] - bb[0][2]).item()
-    base_mesh.apply_translation(-base_mesh.centroid)
-    base_mesh.apply_translation((0, 0, H / 2.0))
+    mesh = builder(p, req.holes or [])  # se espera un trimesh.Trimesh
 
-    # Operaciones (agujeros/cortes/fillet simple)
-    final_mesh = _apply_ops(base_mesh, req.ops)
-
-    # Export STL
-    stl_bytes = final_mesh.export(file_type="stl")
-    if isinstance(stl_bytes, str):
-        stl_bytes = stl_bytes.encode("utf-8")
+    stl_bytes = _export_stl(mesh)
     buf = io.BytesIO(stl_bytes)
+    buf.seek(0)
 
-    # Subir a Supabase
-    object_key = f"{mid}/forge-{os.urandom(4).hex()}.stl"
+    # ruta en bucket: {model}/forge-output-{hash|timestamp}.stl (aquí simple y estable)
+    object_key = f"{req.model}/forge-output.stl"
     url = upload_and_get_url(buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
+
     return GenerateRes(stl_url=url, object_key=object_key)
