@@ -1,14 +1,13 @@
-# supabase_client.py
 import os
-from typing import BinaryIO, Optional
+from typing import Optional, BinaryIO
 from supabase import create_client, Client
 
-SUPABASE_URL: Optional[str] = os.environ.get("SUPABASE_URL")
+SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
 SUPABASE_KEY: Optional[str] = (
-    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")  # <- prioriza Service Role
-    or os.environ.get("SUPABASE_SERVICE_KEY")
-    or os.environ.get("SUPABASE_KEY")
-    or os.environ.get("SUPABASE_ANON_KEY")
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
 )
 
 if not SUPABASE_URL:
@@ -31,20 +30,47 @@ def upload_and_get_url(
     public: bool = False,
     content_type: str = "model/stl",
 ) -> str:
+    """
+    Sube a Supabase Storage usando el SDK oficial.
+    - `upload` espera ruta o bytes; le pasamos BYTES para evitar 'open()'.
+    - `upsert=True` para sobreescribir sin error.
+    - Devuelve URL pública o firmada (1h por defecto).
+    """
     sb = get_supabase()
+
+    if not bucket:
+        raise ValueError("bucket vacío")
+    if not object_key:
+        raise ValueError("object_key vacío")
+
     try:
         fileobj.seek(0)
     except Exception:
         pass
 
+    data = fileobj.read()
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+
+    # Subida (nota: pasamos BYTES, no BytesIO)
     sb.storage.from_(bucket).upload(
         path=object_key,
-        file=fileobj,
+        file=data,
         file_options={"content-type": content_type, "upsert": True},
     )
+
     if public:
         return sb.storage.from_(bucket).get_public_url(object_key)
-    signed = sb.storage.from_(bucket).create_signed_url(
-        object_key, int(os.getenv("SIGNED_URL_EXPIRES", "3600"))
+
+    # URL firmada (1h por defecto)
+    expires = int(os.getenv("SIGNED_URL_EXPIRES", "3600"))
+    signed = sb.storage.from_(bucket).create_signed_url(object_key, expires)
+
+    # Distintas versiones devuelven claves distintas:
+    url = (
+        (isinstance(signed, dict) and (signed.get("signedURL") or signed.get("signed_url") or signed.get("url")))
+        or (str(signed) if signed else None)
     )
-    return signed.get("signedURL") or signed.get("signed_url") or str(signed)
+    if not url:
+        raise RuntimeError(f"No pude obtener URL firmada: {signed!r}")
+    return url
