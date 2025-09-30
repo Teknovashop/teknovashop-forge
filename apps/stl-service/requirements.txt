@@ -1,8 +1,13 @@
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
+
 numpy==1.26.4
 shapely==2.0.3
 trimesh==4.4.3
 
-# SDK oficial, versión reciente (evita el bug del 'proxy')
-supabase==2.20.0
+# Boolean robusta (si falla la descarga, el backend seguirá con fallback)
+manifold3d==2.4.6
+
+# Supabase stack estable con httpx < 0.26
+supabase==2.5.4
+httpx>=0.24,<0.26
