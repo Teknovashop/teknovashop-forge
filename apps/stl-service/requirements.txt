@@ -9,5 +9,5 @@ trimesh==4.4.3
 manifold3d==3.2.1
 
 # Supabase stack estable con httpx < 0.26
-supabase==2.5.4
-httpx>=0.24,<0.26
+supabase==2.20.0
+# httpx>=0.24,<0.26
