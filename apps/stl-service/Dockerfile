@@ -5,13 +5,20 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ \
     libgl1 libglib2.0-0 libglu1-mesa libopengl0 \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
+
+# Ajustes de Python para contenedor
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Instalar dependencias primero para aprovechar cache cuando sea posible
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
+# Copiar el resto del código
 COPY . .
 
 ENV PORT=10000
