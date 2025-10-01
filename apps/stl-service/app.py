@@ -3,17 +3,18 @@ import io
 import os
 import sys
 import traceback
-from typing import List, Optional, Callable, Dict
+from typing import List, Optional, Callable, Dict, Any, Iterable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 
 import trimesh
 from trimesh.creation import box, cylinder
 
 # ---- Supabase helpers (tuyos) ----
 from supabase_client import upload_and_get_url
+
 
 # ============================================================
 #  Carga tolerante de REGISTRY desde apps/stl-service/models.py
@@ -80,6 +81,52 @@ def _load_registry() -> Dict[str, Callable]:
         "router_mount": _build_router_mount,
     }
 
+
+# ============================================================
+#           Normalización robusta de agujeros
+# ============================================================
+
+def _hole_to_dict(h: Any) -> Dict[str, float]:
+    """
+    Normaliza un agujero a dict con claves x_mm, z_mm, d_mm.
+    Acepta:
+      - Objetos Pydantic v2 (model_dump)
+      - Objetos Pydantic v1 (dict)
+      - dicts
+      - objetos con atributos x_mm / z_mm / d_mm
+    """
+    # Pydantic v2
+    if hasattr(h, "model_dump"):
+        d = h.model_dump()
+    # Pydantic v1
+    elif hasattr(h, "dict"):
+        d = h.dict()
+    elif isinstance(h, dict):
+        d = h
+    else:
+        d = {
+            "x_mm": getattr(h, "x_mm", 0),
+            "z_mm": getattr(h, "z_mm", 0),
+            "d_mm": getattr(h, "d_mm", 0),
+        }
+
+    return {
+        "x_mm": float(d.get("x_mm", 0) or 0),
+        "z_mm": float(d.get("z_mm", 0) or 0),
+        "d_mm": float(d.get("d_mm", 0) or 0),
+    }
+
+
+def _normalize_holes(holes: Optional[Iterable[Any]]) -> List[Dict[str, float]]:
+    if not holes:
+        return []
+    return [_hole_to_dict(h) for h in holes]
+
+
+# ============================================================
+#            Booleans: taladros a la pieza
+# ============================================================
+
 def _apply_holes(solid: trimesh.Trimesh, holes: List[dict], L: float, H: float) -> trimesh.Trimesh:
     """
     Aplica taladros verticales (desde la tapa superior). Usa boolean difference.
@@ -97,31 +144,38 @@ def _apply_holes(solid: trimesh.Trimesh, holes: List[dict], L: float, H: float) 
         d_mm = float(h.get("d_mm", 0) or 0)
         if d_mm <= 0:
             continue
+
         r = max(0.1, d_mm / 2.0)
-        # UI manda x_mm en [0..L]; lo convertimos a coordenada centrada
+
+        # Si tu UI te da x_mm en coordenadas [0..L], centramos respecto al origen
         cx = float(h.get("x_mm", 0.0)) - (L / 2.0)
-        cz = H  # perforando hacia abajo
-        drill = cylinder(radius=r, height=max(H * 2.0, 50.0), sections=48)
-        # Trimesh: cilindro a lo largo de Z y centrado en origen -> lo subimos
+
+        # Perforamos hacia abajo desde la tapa superior (Z positiva)
+        cz = H
+        drill_height = max(H * 2.0, 50.0)
+
+        drill = cylinder(radius=r, height=drill_height, sections=48)
+        # El cilindro de trimesh va a lo largo de Z y centrado en el origen -> lo subimos
         drill.apply_translation((cx, 0.0, cz))
 
         try:
             if use_manifold and hasattr(solid, "difference"):
-                # Si la lib Manifold está conectada a trimesh en tu entorno
                 solid = solid.difference(drill)
             else:
-                # Fallback de trimesh (puede requerir CGAL/SCAD; si falla seguimos)
+                # Fallback puro de trimesh
                 if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
                     solid = solid.difference(drill, engine="scad")
                 else:
                     solid = solid.difference(drill)
         except Exception:
-            # No rompemos la generación por un taladro que falle
             print("[WARN] Falló un boolean difference; seguimos sin ese agujero.")
             traceback.print_exc()
+
     return solid
 
+
 REGISTRY: Dict[str, Callable] = _load_registry()
+
 
 # ============================================================
 #               Config FastAPI + CORS
@@ -132,10 +186,13 @@ BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
 PUBLIC_READ = os.getenv("SUPABASE_PUBLIC_READ", "0") == "1"
 SIGNED_EXPIRES = int(os.getenv("SIGNED_URL_EXPIRES", "3600"))
 
+
+# Modelos de entrada/salida (ligeros)
 class Hole(BaseModel):
     x_mm: float
     z_mm: float | None = 0
     d_mm: float
+
 
 class Params(BaseModel):
     length_mm: float = Field(..., gt=0)
@@ -143,29 +200,18 @@ class Params(BaseModel):
     height_mm: float = Field(..., gt=0)
     thickness_mm: Optional[float] = Field(default=3, gt=0)
 
+
 class GenerateReq(BaseModel):
     model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | ...")
     params: Params
-    holes: Optional[List[Hole]] = []
+    # Acepta objetos Hole o dicts, y evita lista mutable por defecto
+    holes: Optional[List[Hole | Dict[str, Any]]] = Field(default_factory=list)
 
-    @validator("holes", pre=True)
-    def _coerce(cls, v):
-        if v is None:
-            return []
-        out = []
-        for h in v:
-            out.append(
-                {
-                    "x_mm": float(h.get("x_mm", 0.0)),
-                    "z_mm": float(h.get("z_mm", 0.0)),
-                    "d_mm": float(h.get("d_mm", 0.0)),
-                }
-            )
-        return out
 
 class GenerateRes(BaseModel):
     stl_url: str
     object_key: str
+
 
 app = FastAPI(title="Teknovashop Forge")
 
@@ -177,13 +223,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "models": list(REGISTRY.keys())}
 
+
 def _export_stl(mesh_or_scene: trimesh.Trimesh | trimesh.Scene) -> bytes:
     data = mesh_or_scene.export(file_type="stl")
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
@@ -217,7 +266,10 @@ def generate(req: GenerateReq):
     if builder is None:
         raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
 
-    mesh = builder(p, req.holes or [])  # se espera un trimesh.Trimesh
+    # <<< ARREGLO CLAVE: normalizamos los agujeros venga lo que venga >>>
+    holes_norm = _normalize_holes(req.holes)
+
+    mesh = builder(p, holes_norm)  # se espera un trimesh.Trimesh
 
     stl_bytes = _export_stl(mesh)
     buf = io.BytesIO(stl_bytes)
