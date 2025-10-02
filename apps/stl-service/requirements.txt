@@ -11,3 +11,6 @@ manifold3d==3.2.1
 # Supabase stack estable con httpx < 0.26
 supabase==2.20.0
 # httpx>=0.24,<0.26
+pillow==10.4.0
+pyglet==2.0.15
+
