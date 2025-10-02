@@ -1,4 +1,4 @@
-# apps/app.py
+# apps/stl-service/app.py
 import io
 import os
 import math
@@ -151,7 +151,6 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
     Crea una escena con cámara y 'look_at' para enmarcar el mesh.
     """
     scene = trimesh.Scene(mesh)
-    # Centro y tamaño
     bounds = mesh.bounds
     center = bounds.mean(axis=0)
     ext = (bounds[1] - bounds[0])
@@ -160,10 +159,9 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
 
     # Cámara: ligeramente elevada y ladeada
     distance = diag * 1.8
-    # pequeña rotación suave
     rot_euler = trimesh.transformations.euler_matrix(
-        math.radians(25),  # pitch
-        math.radians(-30), # yaw
+        math.radians(25),   # pitch
+        math.radians(-30),  # yaw
         0.0
     )
     cam_tf = trimesh.scene.cameras.look_at(
@@ -172,19 +170,18 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
         rotation=rot_euler
     )
     scene.camera_transform = cam_tf
-
-    # Luz ambiental simple (el rasterizador de trimesh aplica shading básico)
     return scene
 
 
-def _render_thumbnail_png(mesh: trimesh.Trimesh,
-                          width: int = 800,
-                          height: int = 600,
-                          background=(245, 246, 248, 255)) -> bytes:
+def _render_thumbnail_png(
+    mesh: trimesh.Trimesh,
+    width: int = 900,
+    height: int = 600,
+    background=(245, 246, 248, 255),
+) -> bytes:
     """
-    Render offscreen de una miniatura PNG. Requiere las dependencias de render
-    de trimesh (pyglet/pyopengl) en el entorno. Si falla, se devuelve un
-    wireframe fallback dibujado con PIL.
+    Render offscreen de una miniatura PNG. Si el raster offscreen no está
+    disponible, dibuja un fallback con PIL.
     """
     try:
         scene = _frame_scene_for_mesh(mesh)
@@ -194,12 +191,10 @@ def _render_thumbnail_png(mesh: trimesh.Trimesh,
     except Exception as e:
         print("[WARN] Render offscreen falló, fallback PIL:", e)
 
-    # Fallback: dibujar bounding y silueta básica en PIL
     try:
         from PIL import Image, ImageDraw
         im = Image.new("RGBA", (width, height), background)
         dr = ImageDraw.Draw(im)
-        # dibuja rectángulo central y texto
         pad = 24
         dr.rounded_rectangle(
             [pad, pad, width - pad, height - pad],
@@ -294,6 +289,66 @@ def mdl_wall_bracket(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     return mesh
 
 
+# --------- NUEVOS: fan_guard y desk_hook (para evitar 500 y dar soporte) ---------
+
+def mdl_fan_guard(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    """
+    Aro para ventilador: anillo (cilindro hueco) con grosor T.
+    length_mm ~ diámetro exterior, width_mm ~ diámetro interior (o usa holes para tornillos si quieres).
+    height_mm ~ espesor/densidad (Z).
+    """
+    D_out = float(p["length_mm"])
+    D_in = float(p["width_mm"])
+    Tz = max(2.0, float(p.get("height_mm") or 4.0))  # espesor Z
+
+    R_out = max(1.0, D_out * 0.5)
+    R_in = max(0.1, D_in * 0.5)
+    if R_in >= R_out:
+        R_in = R_out * 0.6  # seguridad
+
+    outer = cylinder(radius=R_out, height=Tz, sections=96)
+    inner = cylinder(radius=R_in, height=Tz + 2.0, sections=96)
+    inner.apply_translation((0, 0, 0.0))
+
+    ring = _boolean_diff(outer, inner) or outer
+    # agujeros opcionales en el aro (top view)
+    ring = _apply_top_holes(ring, holes, D_out, D_out, Tz)
+    ring.apply_translation((0, 0, Tz * 0.5))
+    return ring
+
+
+def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    """
+    Gancho sencillo de mesa: placa + brazo + punta redondeada.
+    length_mm = largo placa; width_mm = ancho; height_mm = alto/alcance del brazo.
+    thickness_mm = grosor de placa y brazo.
+    """
+    L = float(p["length_mm"])
+    W = float(p["width_mm"])
+    H = float(p["height_mm"])
+    T = max(3.0, float(p.get("thickness_mm") or 4.0))
+
+    # Placa base
+    base = box(extents=(L, W, T))
+    base.apply_translation((0, 0, T * 0.5))
+
+    # Brazo (sale por el centro hacia +Y)
+    arm_len = max(W * 0.6, 20.0)
+    arm = box(extents=(T * 1.2, arm_len, T))
+    arm.apply_translation((0, (W * 0.5 - arm_len * 0.5), T * 0.5))
+
+    # Punta redondeada (cilindro lateral)
+    tip_r = max(T * 0.6, 3.0)
+    tip = cylinder(radius=tip_r, height=T * 1.2, sections=64)
+    # giramos el cilindro para que el eje esté en X (ponemos "tumbado")
+    tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
+    tip.apply_translation((0, (W * 0.5 + tip_r * 0.8), T * 0.5))
+
+    mesh = _boolean_union([base, arm, tip])
+    mesh = _apply_top_holes(mesh, holes, L, W, max(H, T))
+    return mesh
+
+
 # Registro de modelos
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
@@ -301,6 +356,8 @@ REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "router_mount": mdl_router_mount,
     "camera_mount": mdl_camera_mount,
     "wall_bracket": mdl_wall_bracket,
+    "fan_guard": mdl_fan_guard,   # nuevo
+    "desk_hook": mdl_desk_hook,   # nuevo
 }
 
 # ============================================================
@@ -324,14 +381,14 @@ class Params(BaseModel):
     fillet_mm: Optional[float] = Field(default=0, ge=0)
 
 class GenerateReq(BaseModel):
-    model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket")
+    model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket | fan_guard | desk_hook")
     params: Params
     holes: Optional[List[Hole]] = []
 
 class GenerateRes(BaseModel):
     stl_url: str
     object_key: str
-    thumb_url: Optional[str] = None  # << añadimos miniatura
+    thumb_url: Optional[str] = None  # miniatura
 
 app = FastAPI(title="Teknovashop Forge")
 
@@ -423,10 +480,8 @@ def thumbnail(req: ThumbnailReq):
     """
     Genera SOLO la miniatura PNG en el bucket, sin guardar STL.
     """
-    # Reusar mismo pipeline
     gen = generate(GenerateReq(model=req.model, params=req.params, holes=req.holes))
     if not gen.thumb_url:
         raise RuntimeError("No se pudo generar la miniatura.")
-    # Clave PNG inferida del object_key (stl)
     png_key = gen.object_key.replace("forge-output.stl", "thumbnail.png")
     return ThumbnailRes(thumb_url=gen.thumb_url, object_key=png_key)
