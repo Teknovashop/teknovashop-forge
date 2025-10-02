@@ -254,6 +254,65 @@ def mdl_wall_bracket(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     return mesh
 
 
+def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    """
+    Gancho de escritorio: placa vertical + cilindro en voladizo como gancho.
+    length_mm = alto, width_mm = fondo (saliente), height_mm = ancho útil de placa.
+    """
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    T = max(3.0, float(p.get("thickness_mm") or 4.0))
+
+    # Placa vertical
+    plate = box(extents=(H, T, L))        # (X=ancho, Y=grosor, Z=alto)
+    plate.apply_translation((0, 0, L * 0.5))
+
+    # Gancho cilíndrico (sale en Y+)
+    r = max(6.0, W * 0.25)                # radio del gancho
+    hook = cylinder(radius=r, height=H, sections=64)
+    # Lo colocamos a media altura y sobresaliendo desde el centro
+    hook.apply_translation((0, r, L * 0.5))
+
+    mesh = _boolean_union([plate, hook])
+    mesh = _apply_top_holes(mesh, holes, H, W, L)
+    return mesh
+
+
+def mdl_fan_guard(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    """
+    Rejilla de ventilador circular básica:
+    - Disco fino (grosor T)
+    - Dos barras cruzadas
+    - Aro exterior de refuerzo
+    length_mm se usa como diámetro.
+    """
+    D = float(p["length_mm"])
+    T = max(2.0, float(p.get("thickness_mm") or 2.0))
+    R = D * 0.5
+
+    # Disco base
+    disc = cylinder(radius=R * 0.95, height=T, sections=128)  # un pelín más pequeño para dejar aro
+    disc.apply_translation((0, 0, T * 0.5))
+
+    # Cruces
+    bar_w = max(T * 2.0, D * 0.06)  # ancho de barra
+    bar1 = box(extents=(D * 0.9, bar_w, T))
+    bar2 = box(extents=(bar_w, D * 0.9, T))
+    for b in (bar1, bar2):
+        b.apply_translation((0, 0, T * 0.5))
+
+    # Aro exterior
+    ring_outer = cylinder(radius=R, height=T, sections=128)
+    ring_inner = cylinder(radius=R * 0.85, height=T + 0.5, sections=128)  # hueco
+    ring_inner.apply_translation((0, 0, -0.25))  # para evitar coplanares
+    ring = _boolean_diff(ring_outer, ring_inner) or ring_outer
+    ring.apply_translation((0, 0, T * 0.5))
+
+    mesh = _boolean_union([disc, bar1, bar2, ring])
+    # Agujeros opcionales: si el usuario quiere atornillar el guard
+    mesh = _apply_top_holes(mesh, holes, D, D, T)
+    return mesh
+
+
 # Registro de modelos
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     # originales
@@ -263,6 +322,8 @@ REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     # nuevos
     "camera_mount": mdl_camera_mount,
     "wall_bracket": mdl_wall_bracket,
+    "desk_hook": mdl_desk_hook,     # ✅ NUEVO
+    "fan_guard": mdl_fan_guard,     # ✅ NUEVO
 }
 
 # ============================================================
@@ -290,7 +351,10 @@ class Params(BaseModel):
 
 
 class GenerateReq(BaseModel):
-    model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket")
+    model: str = Field(
+        ...,
+        description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket | desk_hook | fan_guard",
+    )
     params: Params
     holes: Optional[List[Hole]] = []
 
