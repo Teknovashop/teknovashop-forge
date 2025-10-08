@@ -1,17 +1,16 @@
 # apps/stl-service/app.py
 import io
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import trimesh
 
 from models import MODEL_REGISTRY, available_model_slugs
 from supabase_client import upload_and_get_url
 
-# ---------------- Config ----------------
 CORS_ALLOW_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()] or ["*"]
 BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
 PUBLIC_READ = os.getenv("SUPABASE_PUBLIC_READ", "0") in ("1", "true", "True")
@@ -26,11 +25,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- Schemas ----------------
 class GenerateReq(BaseModel):
-    slug: Optional[str] = None   # preferido
-    model: Optional[str] = None  # compat antiguo
+    slug: Optional[str] = None       # preferido
+    model: Optional[str] = None      # compat antiguo
     params: Optional[Dict[str, Any]] = None
+    holes: Optional[List[Any]] = None  # 👈 soporte explícito de agujeros
     object_key: Optional[str] = None
 
 class GenerateRes(BaseModel):
@@ -38,17 +37,14 @@ class GenerateRes(BaseModel):
     model: str
     object_key: str
     url: Optional[str] = None
-    # aliases (compat con front)
     key: Optional[str] = None
     file: Optional[str] = None
     path: Optional[str] = None
 
-# ---------------- Utils ----------------
 def _export_stl_bytes(mesh: trimesh.Trimesh) -> bytes:
     data = mesh.export(file_type="stl")
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
 
-# ---------------- Endpoints ----------------
 @app.get("/health")
 def health():
     return {"ok": True, "models": available_model_slugs()}
@@ -62,7 +58,6 @@ def generate(req: GenerateReq):
     slug = (req.slug or req.model or "").strip()
     if not slug:
         raise HTTPException(status_code=400, detail="Missing 'slug' in body")
-
     if slug not in MODEL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Modelo '{slug}' no disponible")
 
@@ -72,7 +67,10 @@ def generate(req: GenerateReq):
     if not callable(make_fn):
         raise HTTPException(status_code=500, detail=f"Modelo '{slug}' sin make()")
 
-    params = {**defaults, **(req.params or {})}
+    # Mezcla defaults + overrides y **añade holes** si vienen en el body
+    params: Dict[str, Any] = {**defaults, **(req.params or {})}
+    if req.holes is not None:
+        params["holes"] = req.holes  # los modelos modulares esperan holes dentro de params
 
     try:
         mesh = make_fn(params)
