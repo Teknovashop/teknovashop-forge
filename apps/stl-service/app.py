@@ -350,6 +350,158 @@ def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
 
 
 # Registro de modelos
+
+
+# ---- Nuevos modelos ligeros (no rompen dependencias) ----
+def mdl_headset_stand(p: dict, holes) -> trimesh.Trimesh:
+    # Base
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    base.apply_translation((0, p["thickness_mm"]/2.0, 0))
+    # Mástil
+    mast = box(extents=(p["thickness_mm"]*3.0, p["height_mm"], p["thickness_mm"]))
+    mast.apply_translation((0, p["thickness_mm"] + p["height_mm"]/2.0, -p["width_mm"]/2.0 + p["thickness_mm"]*2.0))
+    # Yoke superior simple
+    y = p["length_mm"]*0.6; r = p["length_mm"]*0.25; t = p["thickness_mm"]
+    bridge = box(extents=(2*r + t, t, y))
+    bridge.apply_translation((0, p["thickness_mm"] + p["height_mm"], -p["width_mm"]/2.0 + t*2.0))
+    return _boolean_union([base, mast, bridge])
+
+def mdl_laptop_stand(p: dict, holes) -> trimesh.Trimesh:
+    import shapely.geometry as sg
+    # Costillas laterales
+    poly = sg.Polygon([(0,0), (0,p["height_mm"]), (p["width_mm"], p["height_mm"]*0.6)])
+    rib = trimesh.creation.extrude_polygon(poly, p["thickness_mm"])
+    rib.apply_translation((-p["length_mm"]/2.0, 0, -p["width_mm"]/2.0))
+    rib2 = rib.copy(); rib2.apply_translation((p["length_mm"] - p["thickness_mm"], 0, 0))
+    # Superficie superior y labio
+    top = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.0))
+    top.apply_translation((0, p["height_mm"], -p["width_mm"]/2.0 + p["width_mm"]*0.6))
+    lip = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*1.5))
+    lip.apply_translation((0, p["thickness_mm"]*1.5, -p["width_mm"]/2.0 + p["thickness_mm"]*2.0))
+    # Base trasera
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.5))
+    base.apply_translation((0, p["thickness_mm"]/2.0, p["width_mm"]/2.0 - p["thickness_mm"]*1.25))
+    return _boolean_union([rib, rib2, top, lip, base])
+
+def mdl_wall_hook(p: dict, holes) -> trimesh.Trimesh:
+    # Placa
+    plate = box(extents=(p["width_mm"], p["thickness_mm"], p["length_mm"]))
+    plate.apply_translation((0, p["thickness_mm"]/2.0, 0))
+    # Brazo
+    arm = box(extents=(p["thickness_mm"], p["thickness_mm"], p["height_mm"]*0.75))
+    arm.apply_translation((0, p["thickness_mm"]/2.0 + p["thickness_mm"], p["height_mm"]*0.75/2.0))
+    tip = cylinder(radius=p["thickness_mm"]/2.0, height=p["thickness_mm"], sections=64)
+    tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2, [1,0,0]))
+    tip.apply_translation((0, p["thickness_mm"], p["height_mm"]*0.75))
+    gusset = box(extents=(p["width_mm"]*0.6, p["thickness_mm"], p["height_mm"]*0.4))
+    gusset.apply_translation((0, p["thickness_mm"]/2.0, p["height_mm"]*0.2))
+    return _boolean_union([plate, arm, tip, gusset])
+
+
+# ---- Bloque 2 de modelos (ligeros) ----
+def mdl_tablet_stand(p: dict, holes) -> trimesh.Trimesh:
+    import shapely.geometry as sg
+    # costillas laterales para ángulo más vertical
+    poly = sg.Polygon([(0,0), (0,p["height_mm"]), (p["width_mm"]*0.7, p["height_mm"]*0.85)])
+    rib = trimesh.creation.extrude_polygon(poly, p["thickness_mm"])
+    rib.apply_translation((-p["length_mm"]/2.0, 0, -p["width_mm"]/2.0))
+    rib2 = rib.copy(); rib2.apply_translation((p["length_mm"] - p["thickness_mm"], 0, 0))
+    # bandeja de apoyo
+    tray = box(extents=(p["length_mm"], p["thickness_mm"]*2.0, p["width_mm"]*0.5))
+    tray.apply_translation((0, p["height_mm"]*0.85, -p["width_mm"]/2.0 + p["width_mm"]*0.35))
+    # labio frontal
+    lip = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.0))
+    lip.apply_translation((0, p["height_mm"]*0.85 + p["thickness_mm"], -p["width_mm"]/2.0 + p["width_mm"]*0.1))
+    return _boolean_union([rib, rib2, tray, lip])
+
+def mdl_ssd_holder(p: dict, holes) -> trimesh.Trimesh:
+    # bandeja 2.5": 100x70mm internas aprox
+    innerL, innerW = 100.0, 70.0
+    t = p["thickness_mm"]
+    base = box(extents=(innerL + 2*t, t, innerW + 2*t)); base.apply_translation((0, t/2, 0))
+    wallL = box(extents=(t, t*8, innerW + 2*t))
+    w1 = wallL.copy(); w1.apply_translation((-(innerL+2*t)/2 + t/2, t*4.5, 0))
+    w2 = wallL.copy(); w2.apply_translation(((innerL+2*t)/2 - t/2, t*4.5, 0))
+    wallW = box(extents=(innerL, t*8, t))
+    w3 = wallW.copy(); w3.apply_translation((0, t*4.5, -(innerW+2*t)/2 + t/2))
+    mesh = _boolean_union([base, w1, w2, w3])
+    return mesh
+
+def mdl_raspi_case(p: dict, holes) -> trimesh.Trimesh:
+    # Base + paredes perimetrales + 4 postes internos
+    L, W, H, t = p["length_mm"], p["width_mm"], p["height_mm"], p["thickness_mm"]
+    base = box(extents=(L, t, W)); base.apply_translation((0, t/2, 0))
+    wall = box(extents=(L, H, t)); w1 = wall.copy(); w1.apply_translation((0, H/2 + t, -(W/2 - t/2)))
+    w2 = wall.copy(); w2.apply_translation((0, H/2 + t, (W/2 - t/2)))
+    wall2 = box(extents=(t, H, W)); w3 = wall2.copy(); w3.apply_translation((-(L/2 - t/2), H/2 + t, 0))
+    w4 = wall2.copy(); w4.apply_translation(((L/2 - t/2), H/2 + t, 0))
+    post = cylinder(radius=t*0.6, height=H, sections=32)
+    p1 = post.copy(); p1.apply_translation((-L*0.35, H/2 + t, -W*0.35))
+    p2 = post.copy(); p2.apply_translation(( L*0.35, H/2 + t, -W*0.35))
+    p3 = post.copy(); p3.apply_translation((-L*0.35, H/2 + t,  W*0.35))
+    p4 = post.copy(); p4.apply_translation(( L*0.35, H/2 + t,  W*0.35))
+    return _boolean_union([base, w1, w2, w3, w4, p1, p2, p3, p4])
+
+def mdl_go_pro_mount(p: dict, holes) -> trimesh.Trimesh:
+    # placa base + horquilla de 3 púas
+    base = box(extents=(p["length_mm"], p["thickness_mm"]*2, p["width_mm"]*0.4))
+    base.apply_translation((0, p["thickness_mm"], 0))
+    prong = box(extents=(p["thickness_mm"], p["thickness_mm"]*2, p["width_mm"]*0.4))
+    a = prong.copy(); a.apply_translation((-p["thickness_mm"], p["thickness_mm"], 0))
+    b = prong.copy(); b.apply_translation((0, p["thickness_mm"], 0))
+    c = prong.copy(); c.apply_translation((p["thickness_mm"], p["thickness_mm"], 0))
+    return _boolean_union([base, a, b, c])
+
+def mdl_monitor_stand(p: dict, holes) -> trimesh.Trimesh:
+    # plataforma + dos patas
+    top = box(extents=(p["length_mm"], p["thickness_mm"]*2, p["width_mm"]))
+    top.apply_translation((0, p["height_mm"] + p["thickness_mm"], 0))
+    leg = box(extents=(p["thickness_mm"]*3, p["height_mm"], p["width_mm"]*0.8))
+    l1 = leg.copy(); l1.apply_translation((-p["length_mm"]/2 + p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
+    l2 = leg.copy(); l2.apply_translation(( p["length_mm"]/2 - p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
+    return _boolean_union([top, l1, l2])
+
+def mdl_camera_plate(p: dict, holes) -> trimesh.Trimesh:
+    # placa con hueco para tuerca 1/4" (aprox) y ranura
+    plate = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    plate.apply_translation((0, p["thickness_mm"]/2, 0))
+    # ranura longitudinal
+    slot = box(extents=(p["length_mm"]*0.6, p["thickness_mm"]*1.2, p["thickness_mm"]*1.5))
+    slot.apply_translation((0, p["thickness_mm"]/2, 0))
+    out = _boolean_diff(plate, [slot])
+    return out or plate
+
+def mdl_hub_holder(p: dict, holes) -> trimesh.Trimesh:
+    # abrazadera en U simple
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    base.apply_translation((0, p["thickness_mm"]/2, 0))
+    wall = box(extents=(p["thickness_mm"]*2, p["height_mm"], p["width_mm"]))
+    w1 = wall.copy(); w1.apply_translation((-p["length_mm"]/2 + p["thickness_mm"], p["height_mm"]/2 + p["thickness_mm"], 0))
+    w2 = wall.copy(); w2.apply_translation(( p["length_mm"]/2 - p["thickness_mm"], p["height_mm"]/2 + p["thickness_mm"], 0))
+    return _boolean_union([base, w1, w2])
+
+def mdl_mic_arm_clip(p: dict, holes) -> trimesh.Trimesh:
+    # C-clip: toroide con corte
+    outer = cylinder(radius=p["width_mm"]/2, height=p["thickness_mm"]*2, sections=96)
+    inner = cylinder(radius=p["width_mm"]/2 - p["thickness_mm"], height=p["thickness_mm"]*2.2, sections=96)
+    gap = box(extents=(p["width_mm"], p["height_mm"], p["thickness_mm"]*4))
+    gap.apply_translation((0, p["height_mm"]/2, 0))
+    ring = _boolean_diff(outer, [inner, gap]) or outer
+    return ring
+
+def mdl_phone_dock(p: dict, holes) -> trimesh.Trimesh:
+    # Soporte inclinado sencillo con canal USB-C
+    top = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]*0.5))
+    top.apply_translation((0, p["height_mm"], -p["width_mm"]*0.2))
+    leg = box(extents=(p["thickness_mm"]*3, p["height_mm"], p["thickness_mm"]*2))
+    leg.apply_translation((0, p["height_mm"]/2, -p["width_mm"]/2 + p["thickness_mm"]*2))
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]*0.4))
+    base.apply_translation((0, p["thickness_mm"]/2, p["width_mm"]*0.3))
+    channel = box(extents=(p["thickness_mm"], p["thickness_mm"]*1.2, p["thickness_mm"]*2.0))
+    channel.apply_translation((0, p["height_mm"]-p["thickness_mm"], -p["width_mm"]*0.2))
+    out = _boolean_union([top, leg, base])
+    out = _boolean_diff(out, [channel]) or out
+    return out
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
     "vesa_adapter": mdl_vesa_adapter,
@@ -358,6 +510,29 @@ REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "wall_bracket": mdl_wall_bracket,
     "fan_guard": mdl_fan_guard,   # nuevo
     "desk_hook": mdl_desk_hook,   # nuevo
+
+    "headset_stand": mdl_headset_stand,
+    "laptop_stand": mdl_laptop_stand,
+    "wall_hook": mdl_wall_hook,
+
+
+    "tablet_stand": mdl_tablet_stand,
+
+    "ssd_holder": mdl_ssd_holder,
+
+    "raspi_case": mdl_raspi_case,
+
+    "go_pro_mount": mdl_go_pro_mount,
+
+    "monitor_stand": mdl_monitor_stand,
+
+    "camera_plate": mdl_camera_plate,
+
+    "hub_holder": mdl_hub_holder,
+
+    "mic_arm_clip": mdl_mic_arm_clip,
+
+    "phone_dock": mdl_phone_dock,
 }
 
 # ============================================================
