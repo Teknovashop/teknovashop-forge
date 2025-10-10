@@ -248,18 +248,36 @@ def _render_thumbnail_png(
 # ============================================================
 
 def mdl_cable_tray(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    """
+    Bandeja: base horizontal con esquinas redondeadas (fillet_mm) y dos laterales.
+    El fillet se aplica SIEMPRE a la base (sin depender de manifold3d).
+    """
+    import shapely.geometry as sg
+    from shapely.ops import unary_union
+
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(1.0, float(p.get("thickness_mm") or 3.0))
+    F = float(p.get("fillet_mm") or 0.0)
 
-    outer = box(extents=(L, W, H))
-    outer.apply_translation((0, 0, H * 0.5))
+    # --- Base con esquinas redondeadas (polígono 2D -> extrusión en Z)
+    rect = sg.box(-L/2.0, -W/2.0, L/2.0, W/2.0)
+    if F > 0:
+        rect = rect.buffer(F, join_style=1, resolution=32).buffer(-F, join_style=1, resolution=32)
 
-    inner = box(extents=(L - 2 * T, W - 2 * T, H + 2.0))
-    inner.apply_translation((0, 0, H))
+    base = trimesh.creation.extrude_polygon(rect, T)
+    base.apply_translation((0, 0, T * 0.5))  # coloca base sobre Z=0
 
-    hollow = _boolean_diff(outer, inner) or outer
-    hollow = _apply_top_holes(hollow, holes, L, W, H)
-    return hollow
+    # --- Laterales (placas verticales)
+    left = box(extents=(L, T, H));  left.apply_translation((0, -(W/2 - T/2), T + H/2))
+    right = box(extents=(L, T, H)); right.apply_translation((0,  (W/2 - T/2), T + H/2))
+
+    # --- Ensamble
+    tray = _boolean_union([base, left, right])
+
+    # Agujeros desde arriba (coordenadas en la base: 0..L, 0..W)
+    tray = _apply_top_holes(tray, holes, L, W, T + H)
+
+    return tray
 
 
 def mdl_vesa_adapter(p: dict, holes: List[Any]) -> trimesh.Trimesh:
