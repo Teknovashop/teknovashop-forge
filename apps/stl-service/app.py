@@ -2,7 +2,7 @@
 import io
 import os
 import math
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable, Dict, Any, Iterable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,31 +33,11 @@ def _hole_get(h: Any, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
-def _boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
-    """
-    Boolean difference con distintos motores. Devuelve None si todos fallan.
-    """
-    try:
-        res = a.difference(b)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
-    except Exception:
-        pass
-
-    try:
-        from trimesh import boolean
-        res = boolean.difference([a, b], engine=None)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], trimesh.Trimesh):
-            return trimesh.util.concatenate(res)
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
-    except Exception:
-        pass
-
+def _as_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
+    if isinstance(obj, trimesh.Trimesh):
+        return obj
+    if isinstance(obj, trimesh.Scene):
+        return obj.dump(concatenate=True)
     return None
 
 
@@ -74,16 +54,67 @@ def _boolean_union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
     try:
         from trimesh import boolean
         res = boolean.union(meshes, engine=None)
-        if isinstance(res, trimesh.Trimesh):
-            return res
+        m = _as_mesh(res)
+        if m is not None:
+            return m
         if isinstance(res, list) and len(res) > 0:
-            return trimesh.util.concatenate(res)
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
+            return trimesh.util.concatenate([_as_mesh(x) or x for x in res])
     except Exception:
         pass
 
     return trimesh.util.concatenate(meshes)
+
+
+def _boolean_diff(a: trimesh.Trimesh, b_or_list: Any) -> Optional[trimesh.Trimesh]:
+    """
+    Boolean difference con distintos motores.
+    Acepta un solo sólido 'b' o una lista de 'cutters'.
+    Devuelve None si todos fallan.
+    """
+    cutters: List[trimesh.Trimesh] = []
+    if isinstance(b_or_list, (list, tuple)):
+        for el in b_or_list:
+            m = _as_mesh(el)
+            if isinstance(el, trimesh.Trimesh):
+                cutters.append(el)
+            elif m is not None:
+                cutters.append(m)
+    else:
+        m = _as_mesh(b_or_list)
+        if isinstance(b_or_list, trimesh.Trimesh):
+            cutters.append(b_or_list)
+        elif m is not None:
+            cutters.append(m)
+
+    # Intento 1: diferencia iterativa
+    current = a
+    try:
+        for c in cutters:
+            res = current.difference(c)
+            m = _as_mesh(res)
+            if m is None:
+                raise RuntimeError("difference fallback")
+            current = m
+        return current
+    except Exception:
+        pass
+
+    # Intento 2: motor boolean de trimesh
+    try:
+        from trimesh import boolean
+        if cutters:
+            res = boolean.difference([current] + cutters, engine=None)
+        else:
+            res = current
+        m = _as_mesh(res)
+        if m is not None:
+            return m
+        if isinstance(res, list) and len(res) > 0:
+            return trimesh.util.concatenate([_as_mesh(x) or x for x in res])
+    except Exception:
+        pass
+
+    return None
 
 
 def _apply_top_holes(solid: trimesh.Trimesh, holes: List[Any], L: float, W: float, H: float) -> trimesh.Trimesh:
@@ -340,16 +371,13 @@ def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     # Punta redondeada (cilindro lateral)
     tip_r = max(T * 0.6, 3.0)
     tip = cylinder(radius=tip_r, height=T * 1.2, sections=64)
-    # giramos el cilindro para que el eje esté en X (ponemos "tumbado")
+    # giramos el cilindro para que el eje esté en X (tumbado)
     tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
     tip.apply_translation((0, (W * 0.5 + tip_r * 0.8), T * 0.5))
 
     mesh = _boolean_union([base, arm, tip])
     mesh = _apply_top_holes(mesh, holes, L, W, max(H, T))
     return mesh
-
-
-# Registro de modelos
 
 
 # ---- Nuevos modelos ligeros (no rompen dependencias) ----
@@ -457,15 +485,14 @@ def mdl_monitor_stand(p: dict, holes) -> trimesh.Trimesh:
     top = box(extents=(p["length_mm"], p["thickness_mm"]*2, p["width_mm"]))
     top.apply_translation((0, p["height_mm"] + p["thickness_mm"], 0))
     leg = box(extents=(p["thickness_mm"]*3, p["height_mm"], p["width_mm"]*0.8))
-    l1 = leg.copy(); l1.apply_translation((-p["length_mm"]/2 + p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
+    l1 = leg.copy(); l1.apply_translation((-p["length_mm"]/2 - (-p["thickness_mm"]*3/2), p["height_mm"]/2, 0))
     l2 = leg.copy(); l2.apply_translation(( p["length_mm"]/2 - p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
     return _boolean_union([top, l1, l2])
 
 def mdl_camera_plate(p: dict, holes) -> trimesh.Trimesh:
-    # placa con hueco para tuerca 1/4" (aprox) y ranura
+    # placa con ranura
     plate = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
     plate.apply_translation((0, p["thickness_mm"]/2, 0))
-    # ranura longitudinal
     slot = box(extents=(p["length_mm"]*0.6, p["thickness_mm"]*1.2, p["thickness_mm"]*1.5))
     slot.apply_translation((0, p["thickness_mm"]/2, 0))
     out = _boolean_diff(plate, [slot])
@@ -502,6 +529,8 @@ def mdl_phone_dock(p: dict, holes) -> trimesh.Trimesh:
     out = _boolean_union([top, leg, base])
     out = _boolean_diff(out, [channel]) or out
     return out
+
+
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
     "vesa_adapter": mdl_vesa_adapter,
@@ -515,23 +544,14 @@ REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "laptop_stand": mdl_laptop_stand,
     "wall_hook": mdl_wall_hook,
 
-
     "tablet_stand": mdl_tablet_stand,
-
     "ssd_holder": mdl_ssd_holder,
-
     "raspi_case": mdl_raspi_case,
-
     "go_pro_mount": mdl_go_pro_mount,
-
     "monitor_stand": mdl_monitor_stand,
-
     "camera_plate": mdl_camera_plate,
-
     "hub_holder": mdl_hub_holder,
-
     "mic_arm_clip": mdl_mic_arm_clip,
-
     "phone_dock": mdl_phone_dock,
 }
 
@@ -559,11 +579,13 @@ class GenerateReq(BaseModel):
     model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket | fan_guard | desk_hook")
     params: Params
     holes: Optional[List[Hole]] = []
+    outputs: Optional[List[str]] = None  # 🔹 NUEVO (opcional): ["stl","svg"]
 
 class GenerateRes(BaseModel):
     stl_url: str
     object_key: str
     thumb_url: Optional[str] = None  # miniatura
+    svg_url: Optional[str] = None    # 🔹 NUEVO (opcional)
 
 app = FastAPI(title="Teknovashop Forge")
 
@@ -579,7 +601,7 @@ app.add_middleware(
 def health():
     return {"ok": True, "models": list(REGISTRY.keys())}
 
-# ------------------------- Generate STL + PNG -------------------------
+# ------------------------- Generate STL + PNG (+ SVG opcional) -------------------------
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
@@ -602,9 +624,11 @@ def generate(req: GenerateReq):
     }
 
     builder: Optional[Callable[[dict, List[Any]], trimesh.Trimesh]] = None
+    chosen = None
     for k in candidates:
         if k in REGISTRY:
             builder = REGISTRY[k]
+            chosen = k
             break
     if builder is None:
         raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
@@ -612,7 +636,7 @@ def generate(req: GenerateReq):
     # Construye la malla base
     mesh = builder(p, req.holes or [])
 
-    # Fillet / chaflán aproximado si procede
+    # Fillet / chaflán aproximado si procede (fallback) – no rompe si falta manifold3d
     f = float(p.get("fillet_mm") or 0.0)
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
@@ -622,7 +646,7 @@ def generate(req: GenerateReq):
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
 
     # Guardar en Supabase
-    base_key = req.model.replace("_", "-")
+    base_key = (chosen or req.model).replace("_", "-")
     object_key = f"{base_key}/forge-output.stl"
     stl_url = upload_and_get_url(stl_buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
 
@@ -637,7 +661,21 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] No se pudo generar miniatura:", e)
 
-    return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url)
+    # SVG opcional SOLO si se pide y el modelo lo soporta explícitamente
+    svg_url = None
+    try:
+        want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
+        if want_svg and (chosen or req.model).replace("-", "_") == "cable_tray":
+            from models.cable_tray import make_svg as cable_tray_make_svg
+            svg_text = cable_tray_make_svg(p, req.holes or [])
+            if svg_text:
+                svg_buf = io.BytesIO(svg_text.encode("utf-8")); svg_buf.seek(0)
+                svg_key = f"{base_key}/outline.svg"
+                svg_url = upload_and_get_url(svg_buf, svg_key, bucket=BUCKET, public=PUBLIC_READ)
+    except Exception as e:
+        print("[WARN] SVG opcional falló:", e)
+
+    return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url, svg_url=svg_url)
 
 # ------------------------- Solo PNG opcional -------------------------
 
