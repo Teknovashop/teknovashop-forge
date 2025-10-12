@@ -155,13 +155,11 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> tri
     diag = max(diag, 1.0)
 
     distance = diag * 1.8
-    # cámara con FOV explícito
-    cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=60.0)
+    # FOV debe ser un par (fx, fy) ahora
+    cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=(60, 45))
     scene.camera = cam
 
-    # Transform con look_at_matrix (ojo: distinto de scene.cameras.look_at)
-    from trimesh.transformations import look_at_matrix, rotation_matrix, translation_matrix
-    # ángulos suaves para una vista isométrica
+    from trimesh.transformations import rotation_matrix, translation_matrix
     rot = rotation_matrix(math.radians(25), [1, 0, 0]) @ rotation_matrix(math.radians(-30), [0, 0, 1])
     pos = center + np.array([0.0, -distance, distance * 0.6])
     view = np.linalg.inv(translation_matrix(pos) @ rot)
@@ -346,10 +344,6 @@ def _text_to_mesh(
     size_mm: float,
     depth_mm: float,
 ) -> Optional[trimesh.Trimesh]:
-    """
-    Convierte texto -> polígonos -> extrusión (mm).
-    Usa matplotlib.textpath.TextPath (disponible sin freetype extra).
-    """
     try:
         from matplotlib.textpath import TextPath
         from shapely.geometry import Polygon
@@ -362,14 +356,11 @@ def _text_to_mesh(
         for poly in polys:
             if len(poly) < 3:
                 continue
-            # polígono con pequeño buffer para robustez
             shp = Polygon(poly).buffer(0)
             if shp.is_empty:
                 continue
-            # manejar huecos
             if shp.geom_type == "Polygon":
-                ex = trimesh.creation.extrude_polygon(shp, height=depth_mm)
-                solids.append(ex)
+                solids.append(trimesh.creation.extrude_polygon(shp, height=depth_mm))
             else:
                 merged = unary_union(shp)
                 if merged.geom_type == "Polygon":
@@ -386,11 +377,12 @@ def _text_to_mesh(
         return None
 
 # ------------------------------------------------------------
-#      OPERACIONES UNIVERSALES
+#      OPERACIONES UNIVERSALES (fix Z-top)
 # ------------------------------------------------------------
 
 def _mk_cutout(shape: str, x: float, y: float, L: float, W: float,
-               depth: float, d: Optional[float] = None,
+               depth: float, z_center: float,
+               d: Optional[float] = None,
                w: Optional[float] = None, h: Optional[float] = None) -> trimesh.Trimesh:
     cx = x - L * 0.5
     cy = y - W * 0.5
@@ -398,13 +390,13 @@ def _mk_cutout(shape: str, x: float, y: float, L: float, W: float,
     if (shape or "").lower() == "circle":
         r = max(0.05, (float(d or 0.0) * 0.5))
         cutter = cylinder(radius=r, height=depth, sections=64)
-        cutter.apply_translation((cx, cy, depth * 0.5))
+        cutter.apply_translation((cx, cy, z_center))
         return cutter
     else:
         ww = max(0.1, float(w or 0.0))
         hh = max(0.1, float(h or 0.0))
         cutter = box(extents=(ww, hh, depth))
-        cutter.apply_translation((cx, cy, depth * 0.5))
+        cutter.apply_translation((cx, cy, z_center))
         return cutter
 
 
@@ -418,6 +410,9 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
     unions: List[trimesh.Trimesh] = []
     extra_fillet: float = 0.0
 
+    # Z real del tope de la pieza
+    topZ = float(current.bounds[1][2])
+
     for op in ops:
         t = (op.get("type") or "").lower()
 
@@ -428,11 +423,13 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
         if t == "cutout":
             shape = (op.get("shape") or "circle").lower()
             depth = float(op.get("depth_mm") or H)
+            # centramos el cutter a topZ - depth/2 para recortar desde arriba
+            zc = topZ - depth * 0.5
             c = _mk_cutout(
                 shape=shape,
                 x=float(op.get("x_mm") or 0.0),
                 y=float(op.get("y_mm") or 0.0),
-                L=L, W=W, depth=depth,
+                L=L, W=W, depth=depth, z_center=zc,
                 d=op.get("d_mm"),
                 w=op.get("w_mm"), h=op.get("h_mm"),
             )
@@ -448,11 +445,12 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
             start_x = float(op.get("start_x_mm") or 0.0)
             start_y = float(op.get("start_y_mm") or 0.0)
             depth = float(op.get("depth_mm") or H)
+            zc = topZ - depth * 0.5
             for ix in range(nx):
                 for iy in range(ny):
                     x = start_x + ix * dx
                     y = start_y + iy * dy
-                    c = _mk_cutout(shape=shape, x=x, y=y, L=L, W=W, depth=depth,
+                    c = _mk_cutout(shape=shape, x=x, y=y, L=L, W=W, depth=depth, z_center=zc,
                                    d=op.get("d_mm"), w=op.get("w_mm"), h=op.get("h_mm"))
                     cutters.append(c)
             continue
@@ -472,7 +470,7 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
                 bb = txt_mesh.bounds
                 sx = x - L * 0.5 - (bb[0][0])
                 sy = y - W * 0.5 - (bb[0][1])
-                sz = depth * 0.5
+                sz = topZ - depth * 0.5  # ← grabar DESDE ARRIBA
                 txt_mesh.apply_translation((sx, sy, sz))
                 if engrave:
                     cutters.append(txt_mesh)
@@ -501,6 +499,12 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
     return current
 
 # ------------------------- Generate -------------------------
+
+class GenerateRes(BaseModel):
+    stl_url: str
+    object_key: str
+    thumb_url: Optional[str] = None
+    svg_url: Optional[str] = None
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
