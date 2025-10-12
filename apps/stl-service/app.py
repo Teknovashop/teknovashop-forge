@@ -2,7 +2,7 @@
 import io
 import os
 import math
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable, Dict, Any, Iterable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +12,7 @@ import numpy as np
 import trimesh
 from trimesh.creation import box, cylinder
 
-# ---- Supabase helpers (los tuyos) ----
+# ---- Supabase helpers (tuyos) ----
 from supabase_client import upload_and_get_url
 
 # ============================================================
@@ -44,7 +44,6 @@ def _boolean_union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
         return trimesh.Trimesh()
     if len(meshes) == 1:
         return meshes[0]
-
     try:
         from trimesh import boolean
         res = boolean.union(meshes, engine=None)
@@ -55,7 +54,6 @@ def _boolean_union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
             return trimesh.util.concatenate([_as_mesh(x) or x for x in res])
     except Exception:
         pass
-
     return trimesh.util.concatenate(meshes)
 
 
@@ -75,7 +73,6 @@ def _boolean_diff(a: trimesh.Trimesh, b_or_list: Any) -> Optional[trimesh.Trimes
         elif m is not None:
             cutters.append(m)
 
-    # intento iterativo
     current = a
     try:
         for c in cutters:
@@ -88,7 +85,6 @@ def _boolean_diff(a: trimesh.Trimesh, b_or_list: Any) -> Optional[trimesh.Trimes
     except Exception:
         pass
 
-    # intento motor boolean
     try:
         from trimesh import boolean
         if cutters:
@@ -113,16 +109,12 @@ def _apply_top_holes(solid: trimesh.Trimesh, holes: List[Any], L: float, W: floa
         if d_mm <= 0:
             continue
         r = max(0.05, d_mm * 0.5)
-
         x_mm = _hole_get(h, "x_mm", 0.0)
         y_mm = _hole_get(h, "y_mm", 0.0)
-
         cx = x_mm - L * 0.5
         cy = y_mm - W * 0.5
-
         drill = cylinder(radius=r, height=max(H * 1.5, 20.0), sections=64)
         drill.apply_translation((cx, cy, H * 0.5))
-
         diff = _boolean_diff(current, drill)
         if diff is not None:
             current = diff
@@ -152,9 +144,9 @@ def _export_stl(mesh_or_scene: trimesh.Trimesh | trimesh.Scene) -> bytes:
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
 
 
-# ------------------------- Render PNG -------------------------
+# ------------------------- Render PNG (cámara arreglada) -------------------------
 
-def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
+def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> trimesh.Scene:
     scene = trimesh.Scene(mesh)
     bounds = mesh.bounds
     center = bounds.mean(axis=0)
@@ -163,13 +155,17 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
     diag = max(diag, 1.0)
 
     distance = diag * 1.8
-    rot_euler = trimesh.transformations.euler_matrix(
-        math.radians(25),
-        math.radians(-30),
-        0.0
-    )
-    cam_tf = trimesh.scene.cameras.look_at(points=[center], distance=distance, rotation=rot_euler)
-    scene.camera_transform = cam_tf
+    # cámara con FOV explícito
+    cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=60.0)
+    scene.camera = cam
+
+    # Transform con look_at_matrix (ojo: distinto de scene.cameras.look_at)
+    from trimesh.transformations import look_at_matrix, rotation_matrix, translation_matrix
+    # ángulos suaves para una vista isométrica
+    rot = rotation_matrix(math.radians(25), [1, 0, 0]) @ rotation_matrix(math.radians(-30), [0, 0, 1])
+    pos = center + np.array([0.0, -distance, distance * 0.6])
+    view = np.linalg.inv(translation_matrix(pos) @ rot)
+    scene.camera_transform = view
     return scene
 
 
@@ -180,7 +176,7 @@ def _render_thumbnail_png(
     background=(245, 246, 248, 255),
 ) -> bytes:
     try:
-        scene = _frame_scene_for_mesh(mesh)
+        scene = _frame_scene_for_mesh(mesh, width, height)
         img = scene.save_image(resolution=(width, height), background=background)
         if isinstance(img, (bytes, bytearray)):
             return bytes(img)
@@ -215,7 +211,6 @@ def _render_thumbnail_png(
 def mdl_cable_tray(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(1.0, float(p.get("thickness_mm") or 3.0))
-    # U hueca: laterales y base
     outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H * 0.5))
     inner = box(extents=(L - 2 * T, W - 2 * T, H + 2.0)); inner.apply_translation((0, 0, H))
     hollow = _boolean_diff(outer, inner) or outer
@@ -285,7 +280,6 @@ def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     return _apply_top_holes(mesh, holes, L, W, max(H, T))
 
 
-# Registro de modelos
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
     "vesa_adapter": mdl_vesa_adapter,
@@ -320,8 +314,8 @@ class GenerateReq(BaseModel):
     model: str
     params: Params
     holes: Optional[List[Hole]] = []
-    outputs: Optional[List[str]] = None             # ["stl","svg"]
-    operations: Optional[List[Dict[str, Any]]] = None  # 🔸 UNIVERSALES
+    outputs: Optional[List[str]] = None
+    operations: Optional[List[Dict[str, Any]]] = None
 
 class GenerateRes(BaseModel):
     stl_url: str
@@ -344,18 +338,60 @@ def health():
     return {"ok": True, "models": list(REGISTRY.keys())}
 
 # ------------------------------------------------------------
-#      OPERACIONES UNIVERSALES (cutout, text, round, array)
+#      TEXT helper (fallback con matplotlib)
+# ------------------------------------------------------------
+
+def _text_to_mesh(
+    text: str,
+    size_mm: float,
+    depth_mm: float,
+) -> Optional[trimesh.Trimesh]:
+    """
+    Convierte texto -> polígonos -> extrusión (mm).
+    Usa matplotlib.textpath.TextPath (disponible sin freetype extra).
+    """
+    try:
+        from matplotlib.textpath import TextPath
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+
+        tp = TextPath((0, 0), text, size=size_mm)
+        polys: Iterable[np.ndarray] = tp.to_polygons(closed_only=True)
+
+        solids: List[trimesh.Trimesh] = []
+        for poly in polys:
+            if len(poly) < 3:
+                continue
+            # polígono con pequeño buffer para robustez
+            shp = Polygon(poly).buffer(0)
+            if shp.is_empty:
+                continue
+            # manejar huecos
+            if shp.geom_type == "Polygon":
+                ex = trimesh.creation.extrude_polygon(shp, height=depth_mm)
+                solids.append(ex)
+            else:
+                merged = unary_union(shp)
+                if merged.geom_type == "Polygon":
+                    solids.append(trimesh.creation.extrude_polygon(merged, height=depth_mm))
+                else:
+                    for g in getattr(merged, "geoms", []):
+                        if g.geom_type == "Polygon":
+                            solids.append(trimesh.creation.extrude_polygon(g, height=depth_mm))
+        if not solids:
+            return None
+        return _boolean_union(solids)
+    except Exception as e:
+        print("[WARN] Fallback TEXT via matplotlib falló:", e)
+        return None
+
+# ------------------------------------------------------------
+#      OPERACIONES UNIVERSALES
 # ------------------------------------------------------------
 
 def _mk_cutout(shape: str, x: float, y: float, L: float, W: float,
                depth: float, d: Optional[float] = None,
                w: Optional[float] = None, h: Optional[float] = None) -> trimesh.Trimesh:
-    """
-    Crea un "cutter" localizado en (x,y) en el plano de la cara superior.
-    - shape: "circle" usa d (diámetro)
-             "rect"   usa w,h
-    depth: profundidad (en Z) hacia abajo.
-    """
     cx = x - L * 0.5
     cy = y - W * 0.5
     depth = max(depth, 0.1)
@@ -385,12 +421,10 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
     for op in ops:
         t = (op.get("type") or "").lower()
 
-        # round = fillet extra (aprox)
         if t == "round":
             extra_fillet = max(extra_fillet, float(op.get("r_mm") or op.get("r") or 0.0))
             continue
 
-        # cutout simple
         if t == "cutout":
             shape = (op.get("shape") or "circle").lower()
             depth = float(op.get("depth_mm") or H)
@@ -405,7 +439,6 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
             cutters.append(c)
             continue
 
-        # array de cutouts (circle/rect)
         if t == "array":
             shape = (op.get("shape") or "circle").lower()
             nx = max(1, int(op.get("nx") or 1))
@@ -424,7 +457,6 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
                     cutters.append(c)
             continue
 
-        # text: grabado (engrave=True => difference) o relieve (union)
         if t == "text":
             txt = str(op.get("text") or "").strip()
             if not txt:
@@ -435,56 +467,40 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
             y = float(op.get("y_mm") or 0.0)
             engrave = bool(op.get("engrave", True))
 
-            try:
-                # genera contornos del texto como paths y extruye a sólido
-                from trimesh.path.creation import text as path_text
-                path = path_text(txt, font_size=size)
-                # a polígonos (shapely), luego extruir
-                polys = path.polygons_full
-                solids = []
-                if polys:
-                    for poly in polys:
-                        solid = trimesh.creation.extrude_polygon(poly, height=depth)
-                        # desplazar: en top-face, centrado en (x,y)
-                        # path genera texto alrededor de (0,0); lo colocamos con su bbox
-                        bb = solid.bounds
-                        sx = x - L * 0.5 - (bb[0][0])
-                        sy = y - W * 0.5 - (bb[0][1])
-                        sz = depth * 0.5
-                        solid.apply_translation((sx, sy, sz))
-                        solids.append(solid)
-                    txt_mesh = _boolean_union(solids)
-                    if engrave:
-                        cutters.append(txt_mesh)
-                    else:
-                        unions.append(txt_mesh)
-            except Exception as e:
-                print("[WARN] Texto no soportado (trimesh.path/shapely indisponible):", e)
-            continue
+            txt_mesh = _text_to_mesh(txt, size, depth)
+            if txt_mesh is not None:
+                bb = txt_mesh.bounds
+                sx = x - L * 0.5 - (bb[0][0])
+                sy = y - W * 0.5 - (bb[0][1])
+                sz = depth * 0.5
+                txt_mesh.apply_translation((sx, sy, sz))
+                if engrave:
+                    cutters.append(txt_mesh)
+                else:
+                    unions.append(txt_mesh)
+            else:
+                print("[WARN] No se pudo generar el texto; se omite.")
 
-    # aplica uniones primero (emboss)
     if unions:
         current = _boolean_union([current] + unions)
 
-    # aplica diferencias en bloque si es posible
     if cutters:
         diff = _boolean_diff(current, cutters)
         if diff is not None:
             current = diff
         else:
-            print("[WARN] difference batch falló; intentando por partes…")
+            print("[WARN] difference batch falló; aplicando por piezas…")
             for c in cutters:
                 tmp = _boolean_diff(current, c)
                 if tmp is not None:
                     current = tmp
 
-    # fillet adicional solicitado por "round"
     if extra_fillet > 0.0:
         current = _apply_rounding_if_possible(current, extra_fillet)
 
     return current
 
-# ------------------------- Generate STL + PNG (+ SVG opcional) -------------------------
+# ------------------------- Generate -------------------------
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
@@ -513,21 +529,17 @@ def generate(req: GenerateReq):
     if builder is None:
         raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
 
-    # malla base
     mesh = builder(p, req.holes or [])
 
-    # fillet "global" (param)
     f = float(p.get("fillet_mm") or 0.0)
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
 
-    # 🔸 operaciones universales
     try:
         mesh = _apply_operations(mesh, req.operations or [], p["length_mm"], p["width_mm"], p["height_mm"])
     except Exception as e:
         print("[WARN] Falló _apply_operations:", e)
 
-    # STL
     stl_bytes = _export_stl(mesh)
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
 
@@ -535,7 +547,6 @@ def generate(req: GenerateReq):
     object_key = f"{base_key}/forge-output.stl"
     stl_url = upload_and_get_url(stl_buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
 
-    # PNG
     thumb_url = None
     try:
         png_bytes = _render_thumbnail_png(mesh, width=900, height=600, background=(245, 246, 248, 255))
@@ -546,7 +557,6 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] No se pudo generar miniatura:", e)
 
-    # SVG opcional (solo si se solicita y hay generador específico)
     svg_url = None
     try:
         want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
@@ -563,7 +573,7 @@ def generate(req: GenerateReq):
     return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url, svg_url=svg_url)
 
 
-# ------------------------- Solo PNG opcional -------------------------
+# ------------------------- Thumbnail -------------------------
 
 class ThumbnailReq(BaseModel):
     model: str
