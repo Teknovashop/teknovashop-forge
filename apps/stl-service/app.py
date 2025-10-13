@@ -4,7 +4,7 @@ import os
 import math
 from typing import List, Optional, Callable, Dict, Any, Iterable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -506,8 +506,29 @@ class GenerateRes(BaseModel):
     thumb_url: Optional[str] = None
     svg_url: Optional[str] = None
 
+def _normalize_candidates(model: str) -> List[str]:
+    m = (model or "").strip()
+    return list({
+        m,
+        m.replace("-", "_"),
+        m.replace("_", "-"),
+        m.lower(),
+        m.lower().replace("-", "_"),
+        m.lower().replace("_", "-"),
+    })
+
+def _both_keys(canonical: str) -> Dict[str, str]:
+    """Devuelve paths compatibles: kebab (legacy) y snake (consistente)."""
+    snake = canonical.replace("-", "_")
+    kebab = canonical.replace("_", "-")
+    return {"snake": snake, "kebab": kebab}
+
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
+    # Validación y normalización
+    if not req or not req.model:
+        raise HTTPException(status_code=400, detail="Modelo requerido")
+
     p = {
         "length_mm": req.params.length_mm,
         "width_mm": req.params.width_mm,
@@ -516,65 +537,99 @@ def generate(req: GenerateReq):
         "fillet_mm": req.params.fillet_mm or 0.0,
     }
 
-    candidates = {
-        req.model,
-        req.model.replace("-", "_"),
-        req.model.replace("_", "-"),
-        req.model.lower(),
-        req.model.lower().replace("-", "_"),
-        req.model.lower().replace("_", "-"),
-    }
-
+    # Resolver builder con alias snake/kebab
+    candidates = _normalize_candidates(req.model)
     builder: Optional[Callable[[dict, List[Any]], trimesh.Trimesh]] = None
     chosen = None
     for k in candidates:
         if k in REGISTRY:
-            builder = REGISTRY[k]; chosen = k; break
+            builder = REGISTRY[k]
+            chosen = k
+            break
     if builder is None:
-        raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}",
+        )
 
+    # Construcción base + fillet global
     mesh = builder(p, req.holes or [])
-
     f = float(p.get("fillet_mm") or 0.0)
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
 
+    # Operaciones universales
     try:
         mesh = _apply_operations(mesh, req.operations or [], p["length_mm"], p["width_mm"], p["height_mm"])
     except Exception as e:
         print("[WARN] Falló _apply_operations:", e)
 
+    # Export STL
     stl_bytes = _export_stl(mesh)
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
 
-    base_key = (chosen or req.model).replace("_", "-")
-    object_key = f"{base_key}/forge-output.stl"
-    stl_url = upload_and_get_url(stl_buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
+    # --- Compatibilidad de rutas en Storage ---
+    keys = _both_keys(chosen or req.model)  # canonical a partir de chosen
+    # Primaria (LEGACY): kebab-case (igual que tu versión original)
+    base_key_kebab = keys["kebab"]
+    object_key_kebab = f"{base_key_kebab}/forge-output.stl"
+    stl_url = upload_and_get_url(stl_buf, object_key_kebab, bucket=BUCKET, public=PUBLIC_READ)
 
+    # Secundaria (CONSISTENTE): snake_case (por si el bucket está en snake_case)
+    try:
+        stl_buf2 = io.BytesIO(stl_bytes); stl_buf2.seek(0)
+        base_key_snake = keys["snake"]
+        object_key_snake = f"{base_key_snake}/forge-output.stl"
+        _ = upload_and_get_url(stl_buf2, object_key_snake, bucket=BUCKET, public=PUBLIC_READ)
+    except Exception as e:
+        print("[WARN] Upload secundario snake_case falló:", e)
+
+    # Miniatura
     thumb_url = None
     try:
         png_bytes = _render_thumbnail_png(mesh, width=900, height=600, background=(245, 246, 248, 255))
         if png_bytes:
+            # sube en ambos paths
+            png_key_kebab = f"{base_key_kebab}/thumbnail.png"
             png_buf = io.BytesIO(png_bytes); png_buf.seek(0)
-            png_key = f"{base_key}/thumbnail.png"
-            thumb_url = upload_and_get_url(png_buf, png_key, bucket=BUCKET, public=PUBLIC_READ)
+            thumb_url = upload_and_get_url(png_buf, png_key_kebab, bucket=BUCKET, public=PUBLIC_READ)
+
+            try:
+                png_key_snake = f"{base_key_snake}/thumbnail.png"
+                png_buf2 = io.BytesIO(png_bytes); png_buf2.seek(0)
+                _ = upload_and_get_url(png_buf2, png_key_snake, bucket=BUCKET, public=PUBLIC_READ)
+            except Exception as e:
+                print("[WARN] Upload thumb snake_case falló:", e)
     except Exception as e:
         print("[WARN] No se pudo generar miniatura:", e)
 
+    # SVG opcional
     svg_url = None
     try:
         want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
-        if want_svg and (chosen or req.model).replace("-", "_") == "cable_tray":
+        if want_svg and keys["snake"] == "cable_tray":
             from models.cable_tray import make_svg as cable_tray_make_svg
             svg_text = cable_tray_make_svg(p, req.holes or [])
             if svg_text:
                 svg_buf = io.BytesIO(svg_text.encode("utf-8")); svg_buf.seek(0)
-                svg_key = f"{base_key}/outline.svg"
-                svg_url = upload_and_get_url(svg_buf, svg_key, bucket=BUCKET, public=PUBLIC_READ)
+                svg_key_kebab = f"{base_key_kebab}/outline.svg"
+                svg_url = upload_and_get_url(svg_buf, svg_key_kebab, bucket=BUCKET, public=PUBLIC_READ)
+                try:
+                    svg_buf2 = io.BytesIO(svg_text.encode("utf-8")); svg_buf2.seek(0)
+                    svg_key_snake = f"{base_key_snake}/outline.svg"
+                    _ = upload_and_get_url(svg_buf2, svg_key_snake, bucket=BUCKET, public=PUBLIC_READ)
+                except Exception as e:
+                    print("[WARN] Upload SVG snake_case falló:", e)
     except Exception as e:
         print("[WARN] SVG opcional falló:", e)
 
-    return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url, svg_url=svg_url)
+    # Devolvemos la ruta LEGACY (kebab), que es lo que ya usas en el front
+    return GenerateRes(
+        stl_url=stl_url,
+        object_key=object_key_kebab,
+        thumb_url=thumb_url,
+        svg_url=svg_url,
+    )
 
 
 # ------------------------- Thumbnail -------------------------
@@ -592,6 +647,6 @@ class ThumbnailRes(BaseModel):
 def thumbnail(req: ThumbnailReq):
     gen = generate(GenerateReq(model=req.model, params=req.params, holes=req.holes))
     if not gen.thumb_url:
-        raise RuntimeError("No se pudo generar la miniatura.")
+        raise HTTPException(status_code=500, detail="No se pudo generar la miniatura.")
     png_key = gen.object_key.replace("forge-output.stl", "thumbnail.png")
     return ThumbnailRes(thumb_url=gen.thumb_url, object_key=png_key)
