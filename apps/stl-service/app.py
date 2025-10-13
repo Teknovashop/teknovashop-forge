@@ -155,7 +155,6 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> tri
     diag = max(diag, 1.0)
 
     distance = diag * 1.8
-    # FOV debe ser un par (fx, fy) ahora
     cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=(60, 45))
     scene.camera = cam
 
@@ -277,6 +276,73 @@ def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     mesh = _boolean_union([base, arm, tip])
     return _apply_top_holes(mesh, holes, L, W, max(H, T))
 
+# ---------------------------
+#      NUEVOS MODELOS
+# ---------------------------
+
+def mdl_camera_plate(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Placa plana genérica
+    return mdl_vesa_adapter(p, holes)
+
+def mdl_go_pro_mount(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Reutiliza el "camera_mount"
+    return mdl_camera_mount(p, holes)
+
+def mdl_headset_stand(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    T = max(3.0, float(p.get("thickness_mm") or 4.0))
+    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T / 2))
+    pillar = box(extents=(T * 2.0, W * 0.6, H)); pillar.apply_translation((0, 0, H / 2 + T))
+    mesh = _boolean_union([base, pillar])
+    return _apply_top_holes(mesh, holes, L, W, H + T)
+
+def mdl_hub_holder(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Similar a router_mount pero algo más bajo
+    return mdl_router_mount(p, holes)
+
+def mdl_laptop_stand(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    T = max(3.0, float(p.get("thickness_mm") or 4.0))
+    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T / 2))
+    back = box(extents=(L * 0.1, W, H)); back.apply_translation((L * 0.5 - (L * 0.05), 0, H / 2))
+    mesh = _boolean_union([base, back])
+    return _apply_top_holes(mesh, holes, L, W, max(H, T))
+
+def mdl_mic_arm_clip(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Canal en U sencillo (reutiliza cable_tray)
+    return mdl_cable_tray(p, holes)
+
+def mdl_monitor_stand(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Base + columna central (similar a camera_mount)
+    return mdl_camera_mount(p, holes)
+
+def mdl_phone_dock(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    T = max(3.0, float(p.get("thickness_mm") or 4.0))
+    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T / 2))
+    back = box(extents=(L, T * 1.4, H)); back.apply_translation((0, -(W / 2 - T * 0.7), H / 2))
+    mesh = _boolean_union([base, back])
+    return _apply_top_holes(mesh, holes, L, W, max(H, T))
+
+def mdl_raspi_case(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Caja hueca genérica (reutiliza cable_tray, que ya hace caja)
+    return mdl_cable_tray(p, holes)
+
+def mdl_cable_clip(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+    # Clip simple: prisma + media caña
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    T = max(2.0, float(p.get("thickness_mm") or 3.0))
+    body = box(extents=(L, W, H)); body.apply_translation((0, 0, H / 2))
+    notch_r = max(min(W, H) * 0.35, 2.0)
+    notch = cylinder(radius=notch_r, height=L + 2.0, sections=64)
+    notch.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
+    notch.apply_translation((0, 0, H * 0.5))
+    mesh = _boolean_diff(body, notch) or body
+    return _apply_top_holes(mesh, holes, L, W, H)
+
+# ============================================================
+#               REGISTRY (incluye los nuevos)
+# ============================================================
 
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
@@ -286,6 +352,18 @@ REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "wall_bracket": mdl_wall_bracket,
     "fan_guard": mdl_fan_guard,
     "desk_hook": mdl_desk_hook,
+
+    # nuevos / alias esperados por tu front
+    "camera_plate": mdl_camera_plate,
+    "go_pro_mount": mdl_go_pro_mount,
+    "headset_stand": mdl_headset_stand,
+    "hub_holder": mdl_hub_holder,
+    "laptop_stand": mdl_laptop_stand,
+    "mic_arm_clip": mdl_mic_arm_clip,
+    "monitor_stand": mdl_monitor_stand,
+    "phone_dock": mdl_phone_dock,
+    "raspi_case": mdl_raspi_case,
+    "cable_clip": mdl_cable_clip,
 }
 
 # ============================================================
@@ -339,11 +417,7 @@ def health():
 #      TEXT helper (fallback con matplotlib)
 # ------------------------------------------------------------
 
-def _text_to_mesh(
-    text: str,
-    size_mm: float,
-    depth_mm: float,
-) -> Optional[trimesh.Trimesh]:
+def _text_to_mesh(text: str, size_mm: float, depth_mm: float) -> Optional[trimesh.Trimesh]:
     try:
         from matplotlib.textpath import TextPath
         from shapely.geometry import Polygon
@@ -410,7 +484,6 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
     unions: List[trimesh.Trimesh] = []
     extra_fillet: float = 0.0
 
-    # Z real del tope de la pieza
     topZ = float(current.bounds[1][2])
 
     for op in ops:
@@ -423,7 +496,6 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
         if t == "cutout":
             shape = (op.get("shape") or "circle").lower()
             depth = float(op.get("depth_mm") or H)
-            # centramos el cutter a topZ - depth/2 para recortar desde arriba
             zc = topZ - depth * 0.5
             c = _mk_cutout(
                 shape=shape,
@@ -470,7 +542,7 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
                 bb = txt_mesh.bounds
                 sx = x - L * 0.5 - (bb[0][0])
                 sy = y - W * 0.5 - (bb[0][1])
-                sz = topZ - depth * 0.5  # ← grabar DESDE ARRIBA
+                sz = topZ - depth * 0.5
                 txt_mesh.apply_translation((sx, sy, sz))
                 if engrave:
                     cutters.append(txt_mesh)
@@ -518,14 +590,12 @@ def _normalize_candidates(model: str) -> List[str]:
     })
 
 def _both_keys(canonical: str) -> Dict[str, str]:
-    """Devuelve paths compatibles: kebab (legacy) y snake (consistente)."""
     snake = canonical.replace("-", "_")
     kebab = canonical.replace("_", "-")
     return {"snake": snake, "kebab": kebab}
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
-    # Validación y normalización
     if not req or not req.model:
         raise HTTPException(status_code=400, detail="Modelo requerido")
 
@@ -537,7 +607,6 @@ def generate(req: GenerateReq):
         "fillet_mm": req.params.fillet_mm or 0.0,
     }
 
-    # Resolver builder con alias snake/kebab
     candidates = _normalize_candidates(req.model)
     builder: Optional[Callable[[dict, List[Any]], trimesh.Trimesh]] = None
     chosen = None
@@ -552,30 +621,24 @@ def generate(req: GenerateReq):
             detail=f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}",
         )
 
-    # Construcción base + fillet global
     mesh = builder(p, req.holes or [])
     f = float(p.get("fillet_mm") or 0.0)
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
 
-    # Operaciones universales
     try:
         mesh = _apply_operations(mesh, req.operations or [], p["length_mm"], p["width_mm"], p["height_mm"])
     except Exception as e:
         print("[WARN] Falló _apply_operations:", e)
 
-    # Export STL
     stl_bytes = _export_stl(mesh)
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
 
-    # --- Compatibilidad de rutas en Storage ---
-    keys = _both_keys(chosen or req.model)  # canonical a partir de chosen
-    # Primaria (LEGACY): kebab-case (igual que tu versión original)
+    keys = _both_keys(chosen or req.model)
     base_key_kebab = keys["kebab"]
     object_key_kebab = f"{base_key_kebab}/forge-output.stl"
     stl_url = upload_and_get_url(stl_buf, object_key_kebab, bucket=BUCKET, public=PUBLIC_READ)
 
-    # Secundaria (CONSISTENTE): snake_case (por si el bucket está en snake_case)
     try:
         stl_buf2 = io.BytesIO(stl_bytes); stl_buf2.seek(0)
         base_key_snake = keys["snake"]
@@ -584,16 +647,13 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] Upload secundario snake_case falló:", e)
 
-    # Miniatura
     thumb_url = None
     try:
         png_bytes = _render_thumbnail_png(mesh, width=900, height=600, background=(245, 246, 248, 255))
         if png_bytes:
-            # sube en ambos paths
             png_key_kebab = f"{base_key_kebab}/thumbnail.png"
             png_buf = io.BytesIO(png_bytes); png_buf.seek(0)
             thumb_url = upload_and_get_url(png_buf, png_key_kebab, bucket=BUCKET, public=PUBLIC_READ)
-
             try:
                 png_key_snake = f"{base_key_snake}/thumbnail.png"
                 png_buf2 = io.BytesIO(png_bytes); png_buf2.seek(0)
@@ -603,7 +663,6 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] No se pudo generar miniatura:", e)
 
-    # SVG opcional
     svg_url = None
     try:
         want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
@@ -623,14 +682,12 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] SVG opcional falló:", e)
 
-    # Devolvemos la ruta LEGACY (kebab), que es lo que ya usas en el front
     return GenerateRes(
         stl_url=stl_url,
         object_key=object_key_kebab,
         thumb_url=thumb_url,
         svg_url=svg_url,
     )
-
 
 # ------------------------- Thumbnail -------------------------
 
