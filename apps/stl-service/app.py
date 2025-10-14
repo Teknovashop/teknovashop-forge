@@ -219,8 +219,9 @@ class GenerateReq(BaseModel):
     model: str
     params: Params
     holes: Optional[List[Hole]] = []
-    outputs: Optional[List[str]] = None
-    operations: Optional[List[Dict[str, Any]]] = None
+    # ⇩⇩ AÑADIDOS para evitar AttributeError y soportar SVG opcional
+    operations: Optional[List[Dict[str, Any]]] = []
+    outputs: Optional[List[str]] = []
 
 class GenerateRes(BaseModel):
     stl_url: str
@@ -480,9 +481,10 @@ def generate(req: GenerateReq):
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
 
-    # Operaciones universales
+    # Operaciones universales (defensivo)
     try:
-        mesh = _apply_operations(mesh, req.operations or [], p["length_mm"], p["width_mm"], p["height_mm"])
+        ops = req.operations or []
+        mesh = _apply_operations(mesh, ops, p["length_mm"], p["width_mm"], p["height_mm"])
     except Exception as e:
         print("[WARN] Falló _apply_operations:", e)
 
