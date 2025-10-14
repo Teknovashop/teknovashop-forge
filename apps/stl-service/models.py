@@ -15,24 +15,16 @@ def _difference_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
     """
     Intenta a - b usando varios motores. Si todo falla, devuelve 'a' sin romper.
     """
+    # 1) motor por defecto de trimesh
     try:
-        res = a.difference(b)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
+        return a.difference(b)
     except Exception:
         pass
 
+    # 2) OpenSCAD si existe
     try:
-        from trimesh import boolean
-        res = boolean.difference([a, b], engine=None)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        if isinstance(res, list) and len(res) > 0:
-            return trimesh.util.concatenate(res)
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
+        if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
+            return a.difference(b, engine="scad")
     except Exception:
         pass
 
@@ -50,23 +42,26 @@ def _union_safe(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
     if not meshes:
         return box(extents=(1, 1, 1))
 
+    # 1) union de trimesh
     try:
-        from trimesh import boolean
-        res = boolean.union(meshes, engine=None)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        if isinstance(res, list) and len(res) > 0:
-            return trimesh.util.concatenate(res)
-        if isinstance(res, trimesh.Scene):
-            return res.dump(concatenate=True)
+        return trimesh.boolean.union(meshes)
     except Exception:
         pass
 
+    # 2) OpenSCAD si existe
+    try:
+        if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
+            return trimesh.boolean.union(meshes, engine="scad")
+    except Exception:
+        pass
+
+    # 3) concatenar (no booleano pero mantiene geometría combinada)
     try:
         return trimesh.util.concatenate(meshes)
     except Exception:
         pass
 
+    # 4) último recurso: primera
     return meshes[0]
 
 
@@ -78,6 +73,7 @@ def _ensure_watertight(m: trimesh.Trimesh) -> trimesh.Trimesh:
         if not m.is_watertight:
             m = m.fill_holes()
         if not m.is_watertight:
+            # como último recurso: convex_hull
             m = m.convex_hull
     except Exception:
         traceback.print_exc()
@@ -95,6 +91,7 @@ def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: flo
     out = base
     for h in holes:
         try:
+            # Acepta dict o pydantic
             x_mm = float(h.get("x_mm") if isinstance(h, dict) else getattr(h, "x_mm", 0.0))
             d_mm = float(h.get("d_mm") if isinstance(h, dict) else getattr(h, "d_mm", 0.0))
         except Exception:
@@ -105,8 +102,9 @@ def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: flo
 
         r = max(0.15, d_mm / 2.0)
         cx = x_mm - (L / 2.0)
+        # cilindro largo para atravesar con margen
         drill = cylinder(radius=r, height=max(H * 3.0, 60.0), sections=64)
-        drill.apply_translation((cx, 0.0, H))
+        drill.apply_translation((cx, 0.0, H))  # taladro “desde arriba”
         out = _difference_safe(out, drill)
 
     return out
@@ -118,7 +116,10 @@ def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: flo
 
 def _fillet_top_edges(base: trimesh.Trimesh, L: float, W: float, H: float, r: float) -> trimesh.Trimesh:
     """
-    Aproximación de fillet en las 4 aristas superiores exteriores.
+    Aproximación de fillet en las 4 aristas superiores exteriores:
+      - Restamos 4 cilindros en aristas
+      - Restamos 4 esferas en esquinas
+    Más estable que solo cilindros.
     """
     if r <= 0:
         return base
@@ -126,19 +127,21 @@ def _fillet_top_edges(base: trimesh.Trimesh, L: float, W: float, H: float, r: fl
     r = float(max(0.2, min(r, min(L, W) * 0.25)))
     out = base
 
-    # Cilindros alineados con X
+    # Cilindros alineados con X (en Y=±W/2)
     cyl_x = cylinder(radius=r, height=L + 2 * r, sections=64)
     cyl_x.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
+
     c1 = cyl_x.copy(); c1.apply_translation((0.0, +W / 2.0, H - r))
     c2 = cyl_x.copy(); c2.apply_translation((0.0, -W / 2.0, H - r))
 
-    # Cilindros alineados con Y
+    # Cilindros alineados con Y (en X=±L/2)
     cyl_y = cylinder(radius=r, height=W + 2 * r, sections=64)
     cyl_y.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0]))
+
     c3 = cyl_y.copy(); c3.apply_translation((+L / 2.0, 0.0, H - r))
     c4 = cyl_y.copy(); c4.apply_translation((-L / 2.0, 0.0, H - r))
 
-    # Esferas en esquinas
+    # Esferas en esquinas superiores (suaviza la intersección de cilindros)
     s = icosphere(subdivisions=3, radius=r)
     s1 = s.copy(); s1.apply_translation((+L / 2.0, +W / 2.0, H - r))
     s2 = s.copy(); s2.apply_translation((+L / 2.0, -W / 2.0, H - r))
@@ -151,6 +154,7 @@ def _fillet_top_edges(base: trimesh.Trimesh, L: float, W: float, H: float, r: fl
             out = _difference_safe(out, cutter)
         except Exception:
             traceback.print_exc()
+            # seguimos si una resta falla
             continue
 
     return out
@@ -231,7 +235,7 @@ def wall_bracket(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trim
 
 def desk_hook(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
     """
-    Gancho simple en J.
+    Gancho simple en J: “columna” + “brazo”. Sin boolean union agresivo.
     """
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     t = max(3.0, float(p.get("thickness_mm", 4.0)))
@@ -240,7 +244,7 @@ def desk_hook(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh
     spine = box(extents=(t, W, H)); spine.apply_translation((-(L / 2.0) + t / 2.0, 0, H / 2.0))
     arm = box(extents=(L * 0.6, W, t)); arm.apply_translation((-(L * 0.2), 0, t / 2.0))
 
-    m = _union_safe([spine, arm])
+    m = _union_safe([spine, arm])  # usa concatenate si falla union → no 500
     m = _add_holes_top(m, holes, L, max(H, t))
     if fillet_r > 0:
         m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
