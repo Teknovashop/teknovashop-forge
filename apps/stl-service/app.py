@@ -1,7 +1,10 @@
+# apps/stl-service/app.py
 import io
 import os
 import math
-from typing import List, Optional, Callable, Dict, Any, Iterable, Tuple
+import traceback
+import inspect
+from typing import List, Optional, Callable, Dict, Any, Iterable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,11 +14,10 @@ import numpy as np
 import trimesh
 from trimesh.creation import box, cylinder
 
-# ---- Registro de modelos de tu proyecto
-# OJO: este __init__ puede devolver funciones o dicts con metadatos.
-from models import REGISTRY as MODEL_REGISTRY  # apps/stl-service/models/__init__.py
+# ---- Registro de modelos (tu paquete)
+from models import REGISTRY as MODEL_REGISTRY
 
-# ---- Supabase helpers (los tuyos)
+# ---- Supabase helpers
 from supabase_client import upload_and_get_url
 
 # ============================================================
@@ -101,26 +103,6 @@ def _boolean_diff(a: trimesh.Trimesh, b_or_list: Any) -> Optional[trimesh.Trimes
 
     return None
 
-def _apply_top_holes(solid: trimesh.Trimesh, holes: List[Any], L: float, W: float, H: float) -> trimesh.Trimesh:
-    current = solid
-    for h in holes or []:
-        d_mm = _hole_get(h, "d_mm", 0.0)
-        if d_mm <= 0:
-            continue
-        r = max(0.05, d_mm * 0.5)
-        x_mm = _hole_get(h, "x_mm", 0.0)
-        y_mm = _hole_get(h, "y_mm", 0.0)
-        cx = x_mm - L * 0.5
-        cy = y_mm - W * 0.5
-        drill = cylinder(radius=r, height=max(H * 1.5, 20.0), sections=64)
-        drill.apply_translation((cx, cy, H * 0.5))
-        diff = _boolean_diff(current, drill)
-        if diff is not None:
-            current = diff
-        else:
-            print("[WARN] No se pudo aplicar un agujero (CSG no disponible).")
-    return current
-
 def _apply_rounding_if_possible(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
     r = float(fillet_mm or 0.0)
     if r <= 0.0:
@@ -140,7 +122,7 @@ def _export_stl(mesh_or_scene: trimesh.Trimesh | trimesh.Scene) -> bytes:
     data = mesh_or_scene.export(file_type="stl")
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
 
-# ------------------------- Render PNG (cámara arreglada) -------------------------
+# ------------------------- Render PNG -------------------------
 
 def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> trimesh.Scene:
     scene = trimesh.Scene(mesh)
@@ -149,7 +131,6 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> tri
     ext = (bounds[1] - bounds[0])
     diag = float(np.linalg.norm(ext))
     diag = max(diag, 1.0)
-
     distance = diag * 1.8
     cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=(60, 45))
     scene.camera = cam
@@ -219,7 +200,7 @@ class GenerateReq(BaseModel):
     model: str
     params: Params
     holes: Optional[List[Hole]] = []
-    # ⇩⇩ AÑADIDOS para evitar AttributeError y soportar SVG opcional
+    # compat con Forge Pro
     operations: Optional[List[Dict[str, Any]]] = []
     outputs: Optional[List[str]] = []
 
@@ -241,7 +222,6 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    # En algunos repos REGISTRY es dict de dicts/funcs; devolvemos las keys.
     try:
         models = list(MODEL_REGISTRY.keys())
     except Exception:
@@ -286,7 +266,7 @@ def _text_to_mesh(text: str, size_mm: float, depth_mm: float) -> Optional[trimes
         return None
 
 # ------------------------------------------------------------
-#      OPERACIONES UNIVERSALES (fix Z-top)
+#      OPERACIONES UNIVERSALES (Forge Pro)
 # ------------------------------------------------------------
 
 def _mk_cutout(shape: str, x: float, y: float, L: float, W: float,
@@ -317,7 +297,6 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
     cutters: List[trimesh.Trimesh] = []
     unions: List[trimesh.Trimesh] = []
     extra_fillet: float = 0.0
-
     topZ = float(current.bounds[1][2])
 
     for op in ops:
@@ -404,18 +383,57 @@ def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
 
     return current
 
-# ------------------------- Resolución de builder -------------------------
+# ------------------------- Resolución de builder (compat firmas) -------------------------
+
+def _pick_callable_from_entry(entry: Any) -> Callable:
+    """Devuelve una función callable desde un entry del REGISTRY (callable directo o dict con varias claves)."""
+    if callable(entry):
+        return entry
+    if isinstance(entry, dict):
+        for key in ("build", "fn", "make", "factory", "make_model", "model"):
+            cand = entry.get(key)
+            if callable(cand):
+                return cand
+    raise HTTPException(
+        status_code=500,
+        detail="El modelo existe en REGISTRY pero no expone una función callable válida (build/fn/make/factory/make_model)."
+    )
+
+def _wrap_builder_any_sig(fn: Callable) -> Callable[[dict, List[Any]], trimesh.Trimesh]:
+    """
+    Devuelve un wrapper que SIEMPRE acepta (p, holes) y adapta la llamada:
+    - si la función acepta 2 args → fn(p, holes)
+    - si acepta 1 arg → fn(p)
+    - si TypeError por firma, reintenta con la otra forma
+    """
+    sig = None
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        pass
+
+    def call(p: dict, holes: List[Any]) -> trimesh.Trimesh:
+        # camino rápido usando signature si la tenemos
+        if sig:
+            pos_or_kw = [v for v in sig.parameters.values()
+                         if v.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                       inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+            # para métodos bound, len puede ser 1 aunque el origen tuviera self,p
+            if len(pos_or_kw) >= 2:
+                return fn(p, holes)
+            else:
+                return fn(p)
+        # si no hay signature fiable, probamos 2→1 con catch
+        try:
+            return fn(p, holes)
+        except TypeError:
+            return fn(p)
+    return call
 
 def _resolve_builder(name: str) -> Callable[[dict, List[Any]], trimesh.Trimesh]:
-    """
-    Acepta que el REGISTRY pueda mapear:
-    - 'name' -> function(params, holes) -> mesh
-    - 'name' -> {'build': function, ...} (o claves 'fn' | 'make' | 'factory')
-    """
     if not isinstance(MODEL_REGISTRY, dict):
         raise RuntimeError("El REGISTRY de modelos no es un dict válido.")
 
-    # candidatos de nombres (normalizaciones)
     variations = {
         name,
         name.replace("-", "_"),
@@ -437,73 +455,66 @@ def _resolve_builder(name: str) -> Callable[[dict, List[Any]], trimesh.Trimesh]:
             detail=f"Modelo desconocido: {name}. Disponibles: {', '.join(MODEL_REGISTRY.keys())}"
         )
 
-    # Caso 1: directamente callable
-    if callable(entry):
-        return entry  # type: ignore[return-value]
+    fn = _pick_callable_from_entry(entry)
+    return _wrap_builder_any_sig(fn)
 
-    # Caso 2: dict con posibles claves de constructor
-    if isinstance(entry, dict):
-        for key in ("build", "fn", "make", "factory"):
-            cand = entry.get(key)
-            if callable(cand):
-                return cand  # type: ignore[return-value]
+# ------------------------- Núcleo de generación -------------------------
 
-    raise HTTPException(
-        status_code=500,
-        detail=f"El modelo '{name}' existe pero no expone un constructor callable (build/fn/make/factory)."
-    )
+def _generate_core(req: "GenerateReq") -> Dict[str, Any]:
+    p = {
+        "length_mm": req.params.length_mm,
+        "width_mm": req.params.width_mm,
+        "height_mm": req.params.height_mm,
+        "thickness_mm": req.params.thickness_mm or 3.0,
+        "fillet_mm": req.params.fillet_mm or 0.0,
+    }
+
+    builder = _resolve_builder(req.model)
+
+    mesh = builder(p, req.holes or [])
+
+    f = float(p.get("fillet_mm") or 0.0)
+    if f > 0:
+        mesh = _apply_rounding_if_possible(mesh, f)
+
+    ops = req.operations or []
+    mesh = _apply_operations(mesh, ops, p["length_mm"], p["width_mm"], p["height_mm"])
+
+    return {"mesh": mesh, "p": p}
 
 # ------------------------- Generate -------------------------
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
     try:
-        p = {
-            "length_mm": req.params.length_mm,
-            "width_mm": req.params.width_mm,
-            "height_mm": req.params.height_mm,
-            "thickness_mm": req.params.thickness_mm or 3.0,
-            "fillet_mm": req.params.fillet_mm or 0.0,
-        }
+        out = _generate_core(req)
+        mesh = out["mesh"]
+        p = out["p"]
     except ValidationError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
-
-    builder = _resolve_builder(req.model)
-
-    # Generación básica del sólido con agujeros "top"
-    try:
-        mesh = builder(p, req.holes or [])
+    except HTTPException:
+        raise
     except Exception as e:
+        print("[ERROR] Fallo al generar mesh:")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Fallo al construir '{req.model}': {e}")
 
-    # Fillet general
-    f = float(p.get("fillet_mm") or 0.0)
-    if f > 0:
-        mesh = _apply_rounding_if_possible(mesh, f)
-
-    # Operaciones universales (defensivo)
-    try:
-        ops = req.operations or []
-        mesh = _apply_operations(mesh, ops, p["length_mm"], p["width_mm"], p["height_mm"])
-    except Exception as e:
-        print("[WARN] Falló _apply_operations:", e)
-
-    # Export STL
+    # Export y Upload
     stl_bytes = _export_stl(mesh)
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
-
     base_key = (req.model.replace("_", "-")).lower()
     object_key = f"{base_key}/forge-output.stl"
     try:
         stl_url = upload_and_get_url(stl_buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
     except Exception as e:
-        # Mensaje más claro cuando la URL de storage no acaba en '/'
+        print("[ERROR] Fallo subiendo a Supabase:")
+        print(traceback.format_exc())
         msg = str(e)
         if "trailing slash" in msg.lower():
             msg += " (Revisa SUPABASE_URL / storage endpoint: DEBE terminar en '/')."
         raise HTTPException(status_code=500, detail=f"No se pudo subir STL: {msg}")
 
-    # Thumbnail PNG
+    # Thumbnail
     thumb_url = None
     try:
         png_bytes = _render_thumbnail_png(mesh, width=900, height=600, background=(245, 246, 248, 255))
@@ -511,10 +522,11 @@ def generate(req: GenerateReq):
             png_buf = io.BytesIO(png_bytes); png_buf.seek(0)
             png_key = f"{base_key}/thumbnail.png"
             thumb_url = upload_and_get_url(png_buf, png_key, bucket=BUCKET, public=PUBLIC_READ)
-    except Exception as e:
-        print("[WARN] No se pudo generar miniatura:", e)
+    except Exception:
+        print("[WARN] No se pudo generar miniatura:")
+        print(traceback.format_exc())
 
-    # SVG opcional (ejemplo cable_tray, igual que tenías)
+    # SVG opcional (ejemplo cable_tray)
     svg_url = None
     try:
         want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
@@ -526,10 +538,26 @@ def generate(req: GenerateReq):
                 svg_buf = io.BytesIO(svg_text.encode("utf-8")); svg_buf.seek(0)
                 svg_key = f"{base_key}/outline.svg"
                 svg_url = upload_and_get_url(svg_buf, svg_key, bucket=BUCKET, public=PUBLIC_READ)
-    except Exception as e:
-        print("[WARN] SVG opcional falló:", e)
+    except Exception:
+        print("[WARN] SVG opcional falló:")
+        print(traceback.format_exc())
 
     return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url, svg_url=svg_url)
+
+# ------------------------- Debug: generar sin subir -------------------------
+
+@app.post("/debug/generate-no-upload")
+def debug_generate_no_upload(req: GenerateReq):
+    try:
+        out = _generate_core(req)
+        mesh = out["mesh"]
+    except Exception as e:
+        print("[ERROR] debug_generate_no_upload:")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Fallo al construir '{req.model}': {e}")
+
+    stl_bytes = _export_stl(mesh)
+    return {"ok": True, "stl_bytes": len(stl_bytes)}
 
 # ------------------------- Thumbnail -------------------------
 
