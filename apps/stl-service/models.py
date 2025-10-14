@@ -35,7 +35,7 @@ def _difference_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
 
 def _union_safe(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
     """
-    Une varias mallas. Evita convex_hull salvo último último recurso,
+    Une varias mallas. Evita convex_hull salvo último recurso,
     para no “rellenar huecos” y cambiar la forma.
     """
     meshes = [m for m in meshes if m is not None]
@@ -84,7 +84,11 @@ def _ensure_watertight(m: trimesh.Trimesh) -> trimesh.Trimesh:
 # Agujeros por la cara superior (Z+)
 # -------------------------------------
 
-def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: float, H: float) -> trimesh.Trimesh:
+def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: float, H: float, W: float | None = None) -> trimesh.Trimesh:
+    """
+    Taladros pasantes desde Z+, respetando x_mm e y_mm si vienen.
+    El sistema del backend centra el mesh en (0,0), por eso restamos L/2 y W/2.
+    """
     if not holes:
         return base
 
@@ -93,6 +97,7 @@ def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: flo
         try:
             # Acepta dict o pydantic
             x_mm = float(h.get("x_mm") if isinstance(h, dict) else getattr(h, "x_mm", 0.0))
+            y_mm = float(h.get("y_mm") if isinstance(h, dict) else getattr(h, "y_mm", 0.0))
             d_mm = float(h.get("d_mm") if isinstance(h, dict) else getattr(h, "d_mm", 0.0))
         except Exception:
             continue
@@ -102,9 +107,11 @@ def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: flo
 
         r = max(0.15, d_mm / 2.0)
         cx = x_mm - (L / 2.0)
+        cy = (y_mm - (W / 2.0)) if (W is not None) else 0.0
+
         # cilindro largo para atravesar con margen
         drill = cylinder(radius=r, height=max(H * 3.0, 60.0), sections=64)
-        drill.apply_translation((cx, 0.0, H))  # taladro “desde arriba”
+        drill.apply_translation((cx, cy, H))  # taladro “desde arriba”
         out = _difference_safe(out, drill)
 
     return out
@@ -167,7 +174,7 @@ def _fillet_top_edges(base: trimesh.Trimesh, L: float, W: float, H: float, r: fl
 def cable_tray(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     t = max(0.6, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H / 2.0))
     inner_h = max(0.0, H - t)
@@ -175,7 +182,7 @@ def cable_tray(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimes
     inner.apply_translation((0, 0, inner_h / 2.0))
 
     shell = _difference_safe(outer, inner)
-    shell = _add_holes_top(shell, holes, L, H)
+    shell = _add_holes_top(shell, holes, L, H, W)
     if fillet_r > 0:
         shell = _fillet_top_edges(shell, L, W, H, fillet_r)
     return _ensure_watertight(shell)
@@ -184,7 +191,7 @@ def cable_tray(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimes
 def vesa_adapter(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
     L, W = float(p["length_mm"]), float(p["width_mm"])
     t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t / 2.0))
 
@@ -195,7 +202,7 @@ def vesa_adapter(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trim
             drill.apply_translation((sx, sy, t))
             plate = _difference_safe(plate, drill)
 
-    plate = _add_holes_top(plate, holes, L, t)
+    plate = _add_holes_top(plate, holes, L, t, W)
     if fillet_r > 0:
         plate = _fillet_top_edges(plate, L, W, t, fillet_r)
     return _ensure_watertight(plate)
@@ -204,13 +211,13 @@ def vesa_adapter(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trim
 def router_mount(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     base = box(extents=(L, W, t)); base.apply_translation((0, 0, t / 2.0))
     wall = box(extents=(L, t, H)); wall.apply_translation((0, (W / 2.0) - (t / 2.0), H / 2.0))
 
     m = _union_safe([base, wall])
-    m = _add_holes_top(m, holes, L, t)
+    m = _add_holes_top(m, holes, L, t, W)
     if fillet_r > 0:
         m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
     return _ensure_watertight(m)
@@ -219,14 +226,15 @@ def router_mount(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trim
 def wall_bracket(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     foot = box(extents=(L, W, t)); foot.apply_translation((0, 0, t / 2.0))
     up = box(extents=(t, W, H)); up.apply_translation(((L / 2.0) - (t / 2.0), 0, H / 2.0))
     m = _union_safe([foot, up])
 
-    pattern = [{"x_mm": L * 0.25, "d_mm": 6.0}, {"x_mm": L * 0.75, "d_mm": 6.0}]
-    m = _add_holes_top(m, (holes or []) + pattern, L, t)
+    pattern = [{"x_mm": L * 0.25, "y_mm": W * 0.5, "d_mm": 6.0},
+               {"x_mm": L * 0.75, "y_mm": W * 0.5, "d_mm": 6.0}]
+    m = _add_holes_top(m, (holes or []) + pattern, L, t, W)
 
     if fillet_r > 0:
         m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
@@ -239,13 +247,13 @@ def desk_hook(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh
     """
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     t = max(3.0, float(p.get("thickness_mm", 4.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     spine = box(extents=(t, W, H)); spine.apply_translation((-(L / 2.0) + t / 2.0, 0, H / 2.0))
     arm = box(extents=(L * 0.6, W, t)); arm.apply_translation((-(L * 0.2), 0, t / 2.0))
 
     m = _union_safe([spine, arm])  # usa concatenate si falla union → no 500
-    m = _add_holes_top(m, holes, L, max(H, t))
+    m = _add_holes_top(m, holes, L, max(H, t), W)
     if fillet_r > 0:
         m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
     return _ensure_watertight(m)
@@ -257,7 +265,7 @@ def fan_guard(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh
     """
     L, W = float(p["length_mm"]), float(p["width_mm"])
     t = max(2.0, float(p.get("thickness_mm", 2.5)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
+    fillet_r = float(p.get("fillet_r_mm", 0.0) or p.get("fillet_mm", 0.0) or 0.0)
 
     plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t / 2.0))
 
@@ -275,20 +283,174 @@ def fan_guard(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh
             drill.apply_translation((sx, sy, t))
             plate = _difference_safe(plate, drill)
 
-    plate = _add_holes_top(plate, holes, L, t)
+    plate = _add_holes_top(plate, holes, L, t, W)
     if fillet_r > 0:
         plate = _fillet_top_edges(plate, L, W, t, fillet_r)
     return _ensure_watertight(plate)
+
+
+# ---------- NUEVOS MODELOS PARA COMPLETAR LOS 16 ----------
+
+def camera_mount(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(2.0, float(p.get("thickness_mm", 3.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    col_h = max(10.0, H - t)
+    col = box(extents=(t*2, t*2, col_h)); col.apply_translation((0, 0, t + col_h/2))
+    mesh = _union_safe([base, col])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def camera_plate(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W = float(p["length_mm"]), float(p["width_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t/2))
+    # Orificio central (simula 1/4"): ~6.35 mm → r 3.2 mm
+    center = cylinder(radius=3.2, height=max(t*3, 12), sections=64)
+    center.apply_translation((0, 0, t))
+    plate = _difference_safe(plate, center)
+    plate = _add_holes_top(plate, holes, L, t, W)
+    return _ensure_watertight(plate)
+
+def go_pro_mount(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    # Dos orejas/prongs sencillas
+    ear_w, ear_t, ear_h = max(W*0.18, 8), t, max(H*0.4, 10)
+    e1 = box(extents=(ear_t, ear_w, ear_h)); e1.apply_translation((-L*0.15, 0, t + ear_h/2))
+    e2 = box(extents=(ear_t, ear_w, ear_h)); e2.apply_translation(( L*0.15, 0, t + ear_h/2))
+    mesh = _union_safe([base, e1, e2])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def headset_stand(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    col = box(extents=(t*2.0, t*2.0, max(60.0, H))); col.apply_translation((0, 0, t + max(60.0, H)/2))
+    top = box(extents=(L*0.5, t*2.0, t*2.0)); top.apply_translation((0, 0, t + max(60.0, H) + t))
+    mesh = _union_safe([base, col, top])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def hub_holder(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(2.0, float(p.get("thickness_mm", 3.0)))
+    u_outer = box(extents=(L, W, H)); u_outer.apply_translation((0, 0, H/2))
+    u_inner = box(extents=(L - 2*t, W - 2*t, H - t)); u_inner.apply_translation((0, 0, H/2 + t/2))
+    mesh = _difference_safe(u_outer, u_inner)
+    mesh = _add_holes_top(mesh, holes, L, H, W)
+    return _ensure_watertight(mesh)
+
+def laptop_stand(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    wedge = box(extents=(L*0.8, t*2, H)); wedge.apply_translation((-L*0.1, W*0.25, H/2))
+    mesh = _union_safe([base, wedge])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def mic_arm_clip(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    D = float(p["width_mm"])   # usamos width como diámetro exterior aprox
+    H = float(p["height_mm"])  # ancho del clip
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    outer = cylinder(radius=max(10.0, D/2), height=H, sections=96)
+    inner = cylinder(radius=max(5.0, D/2 - t), height=H + 2.0, sections=96)
+    inner.apply_translation((0, 0, 0))
+    c = _difference_safe(outer, inner)
+    # abertura
+    slot = box(extents=(t*1.2, D, H + 2.0)); slot.apply_translation((D/2 - t*0.6, 0, 0))
+    c = _difference_safe(c, slot)
+    c.apply_translation((0, 0, H/2))
+    return _ensure_watertight(c)
+
+def monitor_stand(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(4.0, float(p.get("thickness_mm", 5.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    col = box(extents=(t*3, t*3, max(H*0.8, 60))); col.apply_translation((0, 0, t + max(H*0.8, 60)/2))
+    shelf = box(extents=(L*0.7, t*3, t*2)); shelf.apply_translation((0, 0, t + max(H*0.8, 60) + t))
+    mesh = _union_safe([base, col, shelf])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def phone_dock(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    back = box(extents=(t*2, W*0.9, H)); back.apply_translation((-L*0.35, 0, H/2))
+    slot = box(extents=(t*1.2, W*0.4, t)); slot.apply_translation((-L*0.35, 0, t*0.8))
+    mesh = _difference_safe(_union_safe([base, back]), slot)
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def raspi_case(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(2.4, float(p.get("thickness_mm", 2.4)))
+    outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H/2))
+    inner = box(extents=(L - 2*t, W - 2*t, H - t)); inner.apply_translation((0, 0, H/2 + t/2))
+    box_shell = _difference_safe(outer, inner)
+    box_shell = _add_holes_top(box_shell, holes, L, H, W)
+    return _ensure_watertight(box_shell)
+
+def ssd_holder(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(2.0, float(p.get("thickness_mm", 3.0)))
+    tray = box(extents=(L, W, t)); tray.apply_translation((0, 0, t/2))
+    lip = box(extents=(L, t*2, t*2)); lip.apply_translation((0, -W/2 + t, t))
+    mesh = _union_safe([tray, lip])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def tablet_stand(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t/2))
+    back = box(extents=(t*2, W*0.8, H)); back.apply_translation((-L*0.35, 0, H/2))
+    lip = box(extents=(t*2, W*0.8, t*1.5)); lip.apply_translation((-L*0.1, 0, t*1.0))
+    mesh = _union_safe([base, back, lip])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
+
+def wall_hook(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
+    t = max(3.0, float(p.get("thickness_mm", 4.0)))
+    plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t/2))
+    arm = box(extents=(t*1.5, W*0.5, H)); arm.apply_translation((L*0.3, 0, H/2))
+    tip = cylinder(radius=max(t*0.8, 3.0), height=W*0.5, sections=64)
+    tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2, [1, 0, 0]))
+    tip.apply_translation((L*0.3, 0, H))
+    mesh = _union_safe([plate, arm, tip])
+    mesh = _add_holes_top(mesh, holes, L, max(H, t), W)
+    return _ensure_watertight(mesh)
 
 
 # -----------------------------
 # Registro visible al backend
 # -----------------------------
 REGISTRY: Dict[str, Callable[[Mapping[str, float], List[Mapping[str, Any]]], trimesh.Trimesh]] = {
-    "cable_tray": cable_tray,
-    "vesa_adapter": vesa_adapter,
-    "router_mount": router_mount,
-    "wall_bracket": wall_bracket,
-    "desk_hook": desk_hook,
-    "fan_guard": fan_guard,
+    # existentes
+    "cable_tray":    cable_tray,
+    "vesa_adapter":  vesa_adapter,
+    "router_mount":  router_mount,
+    "wall_bracket":  wall_bracket,
+    "desk_hook":     desk_hook,
+    "fan_guard":     fan_guard,
+
+    # añadidos para completar catálogo
+    "camera_mount":  camera_mount,
+    "camera_plate":  camera_plate,
+    "go_pro_mount":  go_pro_mount,
+    "headset_stand": headset_stand,
+    "hub_holder":    hub_holder,
+    "laptop_stand":  laptop_stand,
+    "mic_arm_clip":  mic_arm_clip,
+    "monitor_stand": monitor_stand,
+    "phone_dock":    phone_dock,
+    "raspi_case":    raspi_case,
+    "ssd_holder":    ssd_holder,
+    "tablet_stand":  tablet_stand,
+    "wall_hook":     wall_hook,
 }
