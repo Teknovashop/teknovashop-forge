@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Iterable, Tuple, List
 import trimesh
 
-# Alias que faltaba para anotaciones y uso de box/Point/etc.
+# Alias necesarios para anotaciones y utilidades de Shapely
 import shapely.geometry as sg
 from shapely.ops import unary_union
 
@@ -15,7 +15,7 @@ def circle(x: float, y: float, d: float, resolution: int = 64) -> sg.Polygon:
     Se usa para restar agujeros en placas.
     """
     r = max(0.0, float(d or 0.0)) * 0.5
-    # evitar radios 0 → buffers degenerados
+    # Evitar radios 0 → buffers degenerados
     if r <= 0:
         r = 0.0001
     return sg.Point(float(x), float(y)).buffer(r, resolution=resolution)
@@ -30,7 +30,7 @@ def rounded_rectangle(L: float, W: float, r: float) -> sg.Polygon:
     r = max(0.0, float(r or 0.0))
     if r <= 0:
         return rect
-    # buffer positivo y luego negativo para “redondear” esquinas
+    # Buffer positivo y luego negativo para redondear esquinas
     return (
         rect.buffer(r, join_style=1, resolution=32)
         .buffer(-r, join_style=1, resolution=32)
@@ -46,9 +46,9 @@ def rounded_plate_with_holes(
 ) -> trimesh.Trimesh:
     """
     Placa XY con esquinas redondeadas y agujeros; extrusión +Z.
-    (Se mantiene la traducción original si tu pipeline la necesita.)
     """
     poly = rounded_rectangle(L, W, fillet_mm)
+
     rings: List[sg.Polygon] = []
     for x, y, d in holes or []:
         rings.append(circle(x, y, d))
@@ -57,10 +57,22 @@ def rounded_plate_with_holes(
         poly = poly.difference(interior)
 
     mesh = trimesh.creation.extrude_polygon(poly, T)
-    # OJO: extrude_polygon extruye en Z; esta traslación en Y estaba en tu código.
-    # La conservo para no romper dependencias previas.
+    # Conservamos la traslación que venías usando para no romper dependencias:
     mesh.apply_translation((0, T / 2.0, 0))
     return mesh
+
+
+# ✅ Alias por compatibilidad histórica:
+# Hay modelos que hacen `from .utils_geo import plate_with_holes`
+# y esperan exactamente ese nombre.
+def plate_with_holes(
+    L: float,
+    W: float,
+    T: float,
+    holes: Iterable[Tuple[float, float, float]] = (),
+    fillet_mm: float = 0.0,
+) -> trimesh.Trimesh:
+    return rounded_plate_with_holes(L, W, T, holes=holes, fillet_mm=fillet_mm)
 
 
 def svg_plate(
@@ -84,22 +96,22 @@ def svg_plate(
     def path_from_polygon(p: sg.Polygon) -> str:
         # Exterior
         ex = list(p.exterior.coords)
-        d = "M " + " L ".join([f"{x:.3f},{-y:.3f}" for x, y in ex]) + " Z"
+        d_attr = "M " + " L ".join([f"{x:.3f},{-y:.3f}" for x, y in ex]) + " Z"
         # Interiors (si quedaran)
         for hole in p.interiors:
             pts = list(hole.coords)
-            d += " M " + " L ".join([f"{x:.3f},{-y:.3f}" for x, y in pts]) + " Z"
-        return d
+            d_attr += " M " + " L ".join([f"{x:.3f},{-y:.3f}" for x, y in pts]) + " Z"
+        return d_attr
 
     if isinstance(poly, sg.MultiPolygon):
-        d_attr = " ".join(path_from_polygon(geom) for geom in poly.geoms)
+        d_all = " ".join(path_from_polygon(geom) for geom in poly.geoms)
     else:
-        d_attr = path_from_polygon(poly)
+        d_all = path_from_polygon(poly)
 
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'width="{L:.3f}mm" height="{W:.3f}mm" viewBox="{-L/2:.3f} {-W/2:.3f} {L:.3f} {W:.3f}">'
-        f'<path d="{d_attr}" fill="none" stroke="black" stroke-width="{stroke}"/>'
+        f'<path d="{d_all}" fill="none" stroke="black" stroke-width="{stroke}"/>'
         f"</svg>"
     )
     return svg
