@@ -1,11 +1,12 @@
 # apps/stl-service/models/utils_geo.py
 from __future__ import annotations
 
-from typing import Iterable, Tuple, List
+from typing import Iterable, Tuple, List, Optional
 import trimesh
 
-# Alias necesarios para anotaciones y utilidades de Shapely
+# Shapely
 import shapely.geometry as sg
+import shapely.affinity as sa
 from shapely.ops import unary_union
 
 
@@ -23,8 +24,8 @@ def circle(x: float, y: float, d: float, resolution: int = 64) -> sg.Polygon:
 
 def rounded_rectangle(L: float, W: float, r: float) -> sg.Polygon:
     """
-    Rectángulo con esquinas redondeadas mediante buffer.
-    r en mm.
+    Rectángulo centrado en (0,0) con esquinas redondeadas mediante buffer.
+    L = size X, W = size Y, r en mm.
     """
     rect = sg.box(-L / 2.0, -W / 2.0, L / 2.0, W / 2.0)
     r = max(0.0, float(r or 0.0))
@@ -35,6 +36,54 @@ def rounded_rectangle(L: float, W: float, r: float) -> sg.Polygon:
         rect.buffer(r, join_style=1, resolution=32)
         .buffer(-r, join_style=1, resolution=32)
     )
+
+
+def slot(
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    r: Optional[float] = None,
+    angle_deg: float = 0.0,
+    resolution: int = 64,
+) -> sg.Polygon:
+    """
+    Ranura (capsule/oblong) centrada en (x,y).
+    - Si no se indica r, se toma r = min(w,h)/2 (estadio clásico).
+    - angle_deg rota la ranura (0 = eje horizontal).
+    Devuelve un *Polygon* de Shapely.
+    """
+    w = float(w); h = float(h)
+    if w <= 0 or h <= 0:
+        # Fallback a un punto casi nulo para no romper booleanas
+        return sg.Point(x, y).buffer(1e-4)
+    r = float(r) if (r is not None) else min(w, h) * 0.5
+    r = max(0.0, r)
+
+    if r == 0:
+        shape = sg.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
+    else:
+        # Construcción por unión: rectángulo + dos semicircunferencias en extremos
+        if w >= h:
+            # Estadio horizontal: “cuerpo” alargado en X
+            rect_len = max(w - 2 * r, 0.0)
+            rect = sg.box(-rect_len / 2.0, -h / 2.0, rect_len / 2.0, h / 2.0)
+            capL = sg.Point(-rect_len / 2.0, 0.0).buffer(r, resolution=resolution)
+            capR = sg.Point(+rect_len / 2.0, 0.0).buffer(r, resolution=resolution)
+            shape = unary_union([rect, capL, capR])
+        else:
+            # Estadio vertical: “cuerpo” alargado en Y
+            rect_len = max(h - 2 * r, 0.0)
+            rect = sg.box(-w / 2.0, -rect_len / 2.0, w / 2.0, rect_len / 2.0)
+            capB = sg.Point(0.0, -rect_len / 2.0).buffer(r, resolution=resolution)
+            capT = sg.Point(0.0, +rect_len / 2.0).buffer(r, resolution=resolution)
+            shape = unary_union([rect, capB, capT])
+
+    # Rotar y trasladar a (x,y)
+    if angle_deg:
+        shape = sa.rotate(shape, angle_deg, origin=(0, 0), use_radians=False)
+    shape = sa.translate(shape, xoff=float(x), yoff=float(y))
+    return shape
 
 
 def rounded_plate_with_holes(
@@ -50,21 +99,19 @@ def rounded_plate_with_holes(
     poly = rounded_rectangle(L, W, fillet_mm)
 
     rings: List[sg.Polygon] = []
-    for x, y, d in holes or []:
-        rings.append(circle(x, y, d))
+    for xh, yh, dh in holes or []:
+        rings.append(circle(xh, yh, dh))
     interior = unary_union(rings) if rings else None
     if interior:
         poly = poly.difference(interior)
 
     mesh = trimesh.creation.extrude_polygon(poly, T)
-    # Conservamos la traslación que venías usando para no romper dependencias:
+    # Conservamos tu traslación para no romper dependencias
     mesh.apply_translation((0, T / 2.0, 0))
     return mesh
 
 
-# ✅ Alias por compatibilidad histórica:
-# Hay modelos que hacen `from .utils_geo import plate_with_holes`
-# y esperan exactamente ese nombre.
+# ✅ Alias por compatibilidad histórica con modelos que importan este nombre:
 def plate_with_holes(
     L: float,
     W: float,
@@ -89,7 +136,7 @@ def svg_plate(
     poly = rounded_rectangle(L, W, fillet_mm)
 
     # restamos los agujeros al contorno
-    rings = [circle(x, y, d) for (x, y, d) in holes or []]
+    rings = [circle(xh, yh, dh) for (xh, yh, dh) in holes or []]
     if rings:
         poly = poly.difference(unary_union(rings))
 
