@@ -1,100 +1,77 @@
 # apps/stl-service/supabase_client.py
-from __future__ import annotations
-
-import io
 import os
-import mimetypes
-from typing import Optional
+from typing import IO, Optional
 
-try:
-    # supabase-py v2
-    from supabase import create_client, Client  # type: ignore
-except Exception as e:
-    raise RuntimeError("Supabase client not installed in the image") from e
+# Usamos el cliente oficial; él construye bien el storage endpoint
+from supabase import create_client, Client
 
 
-def _ensure_trailing_slash(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
-        return url
-    return url if url.endswith("/") else url + "/"
-
-
-# Config
-_SUPABASE_URL = _ensure_trailing_slash(os.getenv("SUPABASE_URL", ""))
-# service key (server-side). En tus envs puede llamarse SERVICE_ROLE_KEY o SERVICE_KEY
-_SUPABASE_KEY = (
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    or os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_SECRET_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")  # último recurso (no recomendado para servidor)
-    or ""
-)
-
-if not _SUPABASE_URL or not _SUPABASE_KEY:
-    raise RuntimeError(
-        "SUPABASE_URL o SUPABASE_SERVICE_* no configurado. "
-        "Revisa variables en Render: SUPABASE_URL (con barra final opcional) y SUPABASE_SERVICE_ROLE_KEY."
+def _get_supabase() -> Client:
+    """
+    Crea el cliente oficial de Supabase con la SERVICE ROLE KEY.
+    - Normaliza la URL (sin doble slash).
+    - Evita construir manualmente el endpoint de storage (no aparece el warning del trailing slash).
+    """
+    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_SECRET_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")  # último fallback; mejor evitarlo para escribir
     )
-
-# Crear cliente (el SDK ya compone storage/v1 internamente)
-_client: Client = create_client(_SUPABASE_URL, _SUPABASE_KEY)
+    if not url or not key:
+        raise RuntimeError("Faltan SUPABASE_URL o SERVICE ROLE KEY en el entorno.")
+    return create_client(url, key)
 
 
 def _guess_content_type(object_key: str) -> str:
-    ctype, _ = mimetypes.guess_type(object_key)
-    if ctype:
-        return ctype
-    # Mapas comunes del proyecto
-    if object_key.lower().endswith(".stl"):
+    k = object_key.lower()
+    if k.endswith(".stl"):
         return "model/stl"
-    if object_key.lower().endswith(".png"):
+    if k.endswith(".png"):
         return "image/png"
-    if object_key.lower().endswith(".svg"):
+    if k.endswith(".svg"):
         return "image/svg+xml"
+    if k.endswith(".jpg") or k.endswith(".jpeg"):
+        return "image/jpeg"
     return "application/octet-stream"
 
 
 def upload_and_get_url(
-    fileobj: io.BytesIO,
+    file_obj: IO[bytes],
     object_key: str,
     bucket: str = "forge-stl",
     public: bool = False,
-    content_type: Optional[str] = None,
+    expires_in: int = 300,  # segundos, si no es público
 ) -> str:
     """
-    Sube el buffer a Supabase Storage (upsert=True) y devuelve URL pública o firmada.
-    - Asegura barra final en SUPABASE_URL (evita 'Storage endpoint URL should have a trailing slash').
-    - Fija content-type correcto (model/stl, image/png, image/svg+xml, ...).
+    Sube un fichero a Supabase Storage y devuelve URL:
+      - Si 'public' → public_url
+      - Si no, signed_url con expiración.
+
+    ¡OJO! No uses headers booleanos. Usa 'file_options={"upsert": True}'.
     """
-    if not object_key:
-        raise ValueError("object_key vacío")
+    sb = _get_supabase()
 
+    # Normaliza la ruta y el content-type
     path = object_key.lstrip("/")
-    fileobj.seek(0)
-    data = fileobj.read()
-    fileobj.seek(0)
+    content_type = _guess_content_type(path)
 
-    ctype = content_type or _guess_content_type(object_key)
-
-    # Subir con upsert para no romper flujos si repetimos nombre
-    _client.storage.from_(bucket).upload(
+    # SUBIR (sin tocar headers; dejamos que la lib convierta 'upsert' correctamente)
+    sb.storage.from_(bucket).upload(
         path=path,
-        file=data,
-        file_options={"content-type": ctype, "upsert": True},
+        file=file_obj,
+        file_options={
+            "contentType": content_type,
+            "upsert": True,              # ← correcto (NO meter "x-upsert": True en headers)
+            # "cacheControl": "3600",    # opcional
+        },
     )
 
+    # URL
     if public:
-        # URL pública directa
-        pub = _client.storage.from_(bucket).get_public_url(path)
-        if isinstance(pub, dict):
-            # algunas versiones devuelven {"publicUrl": "..."}
-            return pub.get("publicUrl") or pub.get("public_url") or ""
-        return pub  # string en otras versiones
+        return sb.storage.from_(bucket).get_public_url(path)
     else:
-        # URL firmada (7 días)
-        signed = _client.storage.from_(bucket).create_signed_url(path, 60 * 60 * 24 * 7)
-        if isinstance(signed, dict):
-            # distintas claves según versión
-            return signed.get("signedURL") or signed.get("signed_url") or signed.get("data", {}).get("signedURL", "")
-        return signed  # string en otras versiones
+        signed = sb.storage.from_(bucket).create_signed_url(path, expires_in)
+        # compat: algunas versiones devuelven 'signedURL' y otras 'signedUrl'
+        return signed.get("signedURL") or signed.get("signedUrl") or ""
