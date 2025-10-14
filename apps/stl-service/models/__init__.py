@@ -134,9 +134,3 @@ def _safe_register(module_name: str, fallback_name: str):
 # --- Registro de modelos opcionales (no bloquean si fallan) ---
 # vesa_shelf: implementado con trimesh para evitar dependencias extra (cadquery).
 _safe_register("vesa_shelf", "vesa_shelf")
-
-
-# --- Nuevos modelos registrados sin romper los existentes ---
-_safe_register('headset_stand', 'headset_stand')
-_safe_register('laptop_stand', 'laptop_stand')
-_safe_register('wall_hook', 'wall_hook')
