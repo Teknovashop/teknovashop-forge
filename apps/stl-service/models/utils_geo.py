@@ -122,6 +122,24 @@ def plate_with_holes(
     return rounded_plate_with_holes(L, W, T, holes=holes, fillet_mm=fillet_mm)
 
 
+def rectangle_plate(L: float, W: float, T: float) -> trimesh.Trimesh:
+    """Placa rectangular centrada (sin redondeo), extruida en +Z y desplazada T/2 en Y para compatibilidad."""
+    poly = sg.box(-L/2.0, -W/2.0, L/2.0, W/2.0)
+    mesh = trimesh.creation.extrude_polygon(poly, T)
+    mesh.apply_translation((0, T/2.0, 0))
+    return mesh
+
+
+def concatenate(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """Wrapper de compatibilidad – algunos modelos importan esto desde utils_geo."""
+    meshes = [m for m in meshes if isinstance(m, trimesh.Trimesh)]
+    if not meshes:
+        return trimesh.Trimesh()
+    if len(meshes) == 1:
+        return meshes[0]
+    return trimesh.util.concatenate(meshes)
+
+
 def svg_plate(
     L: float,
     W: float,
