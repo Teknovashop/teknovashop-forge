@@ -1,142 +1,112 @@
 # apps/stl-service/models/__init__.py
-# Registro central de modelos. El backend importa de aquí.
+from typing import Dict, Any
+import trimesh
+from trimesh.creation import box
 
-# --- Núcleo: modelos existentes (deben estar) ---
-from .vesa_adapter import (
-    NAME as vesa_adapter_name,
-    TYPES as vesa_adapter_types,
-    DEFAULTS as vesa_adapter_defaults,
-    make_model as vesa_adapter_make,
-)
-from .qr_plate import (
-    NAME as qr_plate_name,
-    TYPES as qr_plate_types,
-    DEFAULTS as qr_plate_defaults,
-    make_model as qr_plate_make,
-)
-from .router_mount import (
-    NAME as router_mount_name,
-    TYPES as router_mount_types,
-    DEFAULTS as router_mount_defaults,
-    make_model as router_mount_make,
-)
-from .cable_tray import (
-    NAME as cable_tray_name,
-    TYPES as cable_tray_types,
-    DEFAULTS as cable_tray_defaults,
-    make_model as cable_tray_make,
-)
-from .enclosure_ip65 import (
-    NAME as enclosure_ip65_name,
-    TYPES as enclosure_ip65_types,
-    DEFAULTS as enclosure_ip65_defaults,
-    make_model as enclosure_ip65_make,
-)
-from .cable_clip import (
-    NAME as cable_clip_name,
-    TYPES as cable_clip_types,
-    DEFAULTS as cable_clip_defaults,
-    make_model as cable_clip_make,
-)
-from .phone_stand import (
-    NAME as phone_stand_name,
-    TYPES as phone_stand_types,
-    DEFAULTS as phone_stand_defaults,
-    make_model as phone_stand_make,
-)
 
-# Mapa principal (estructura establecida en tu proyecto)
-REGISTRY = {
-    vesa_adapter_name: {
-        "types": vesa_adapter_types,
-        "defaults": vesa_adapter_defaults,
-        "make": vesa_adapter_make,
+def mm(v, default):
+    try:
+        x = float(v)
+        return x if x > 0 else default
+    except Exception:
+        return default
+
+
+def make_plate(p: Dict[str, Any]) -> trimesh.Trimesh:
+    """
+    Placa rectangular básica: length x width x thickness, apoyada sobre Z=0.
+    El resto (agujeros, arrays, redondeos) se aplica después en app.py.
+    """
+    L = mm(p.get("length_mm") or p.get("length"), 120.0)
+    W = mm(p.get("width_mm") or p.get("width"), 100.0)
+    T = mm(p.get("thickness_mm") or p.get("wall") or p.get("thickness") or 3.0, 3.0)
+    mesh = box(extents=(L, W, T))
+    # Coloca la placa con la base en Z=0 (más cómodo para el visor)
+    mesh.apply_translation((L * 0.5, W * 0.5, T * 0.5))
+    return mesh
+
+
+# Si tienes generadores específicos (ej. cable_tray con paredes),
+# puedes sustituir make_plate por tus funciones reales más adelante.
+REGISTRY: Dict[str, Dict[str, Any]] = {
+    # 1
+    "cable_tray": {
+        "defaults": {"length_mm": 120, "width_mm": 100, "thickness_mm": 3},
+        "make": make_plate,
     },
-    qr_plate_name: {
-        "types": qr_plate_types,
-        "defaults": qr_plate_defaults,
-        "make": qr_plate_make,
+    # 2
+    "vesa_adapter": {
+        "defaults": {"length_mm": 120, "width_mm": 120, "thickness_mm": 3},
+        "make": make_plate,
     },
-    router_mount_name: {
-        "types": router_mount_types,
-        "defaults": router_mount_defaults,
-        "make": router_mount_make,
+    # 3
+    "router_mount": {
+        "defaults": {"length_mm": 120, "width_mm": 80, "thickness_mm": 4},
+        "make": make_plate,
     },
-    cable_tray_name: {
-        "types": cable_tray_types,
-        "defaults": cable_tray_defaults,
-        "make": cable_tray_make,
+    # 4
+    "cable_clip": {
+        "defaults": {"length_mm": 40, "width_mm": 20, "thickness_mm": 3},
+        "make": make_plate,
     },
-    enclosure_ip65_name: {
-        "types": enclosure_ip65_types,
-        "defaults": enclosure_ip65_defaults,
-        "make": enclosure_ip65_make,
+    # 5
+    "headset_stand": {
+        "defaults": {"length_mm": 150, "width_mm": 60, "thickness_mm": 5},
+        "make": make_plate,
     },
-    cable_clip_name: {
-        "types": cable_clip_types,
-        "defaults": cable_clip_defaults,
-        "make": cable_clip_make,
+    # 6
+    "phone_dock": {
+        "defaults": {"length_mm": 100, "width_mm": 60, "thickness_mm": 8},
+        "make": make_plate,
     },
-    phone_stand_name: {
-        "types": phone_stand_types,
-        "defaults": phone_stand_defaults,
-        "make": phone_stand_make,
+    # 7
+    "tablet_stand": {
+        "defaults": {"length_mm": 150, "width_mm": 100, "thickness_mm": 6},
+        "make": make_plate,
+    },
+    # 8
+    "ssd_holder": {
+        "defaults": {"length_mm": 100, "width_mm": 70, "thickness_mm": 3},
+        "make": make_plate,
+    },
+    # 9
+    "raspi_case": {
+        "defaults": {"length_mm": 95, "width_mm": 65, "thickness_mm": 3},
+        "make": make_plate,
+    },
+    # 10
+    "go_pro_mount": {
+        "defaults": {"length_mm": 60, "width_mm": 40, "thickness_mm": 5},
+        "make": make_plate,
+    },
+    # 11
+    "wall_hook": {
+        "defaults": {"length_mm": 80, "width_mm": 40, "thickness_mm": 6},
+        "make": make_plate,
+    },
+    # 12
+    "monitor_stand": {
+        "defaults": {"length_mm": 200, "width_mm": 120, "thickness_mm": 8},
+        "make": make_plate,
+    },
+    # 13
+    "laptop_stand": {
+        "defaults": {"length_mm": 220, "width_mm": 120, "thickness_mm": 8},
+        "make": make_plate,
+    },
+    # 14
+    "mic_arm_clip": {
+        "defaults": {"length_mm": 60, "width_mm": 40, "thickness_mm": 5},
+        "make": make_plate,
+    },
+    # 15
+    "camera_plate": {
+        "defaults": {"length_mm": 120, "width_mm": 100, "thickness_mm": 4},
+        "make": make_plate,
+    },
+    # 16
+    "hub_holder": {
+        "defaults": {"length_mm": 120, "width_mm": 60, "thickness_mm": 4},
+        "make": make_plate,
     },
 }
-
-# --- Helper para registrar modelos opcionales de forma segura ---
-def _infer_types_from_defaults(defaults: dict) -> dict:
-    """Dada una tabla de DEFAULTS, infiere un mapa de TYPES compatible (str:int/float/bool/str/array/any)."""
-    tmap = {}
-    for k, v in (defaults or {}).items():
-        if isinstance(v, bool):
-            tmap[k] = "bool"
-        elif isinstance(v, int):
-            tmap[k] = "int"
-        elif isinstance(v, float):
-            tmap[k] = "float"
-        elif isinstance(v, str):
-            tmap[k] = "str"
-        elif isinstance(v, (list, tuple)):
-            tmap[k] = "array"
-        else:
-            tmap[k] = "any"
-    return tmap
-
-def _safe_register(module_name: str, fallback_name: str):
-    """
-    Intenta importar un módulo de modelo opcional y registrarlo en REGISTRY.
-    - Acepta NAME, DEFAULTS, TYPES, y make_model/make.
-    - Si TYPES no existe, lo infiere de DEFAULTS.
-    - Si falla el import, no rompe el arranque.
-    """
-    try:
-        # Import relativo dentro del paquete
-        module = __import__(f".{module_name}", globals(), locals(), fromlist=["*"])
-    except Exception as e:
-        print(f"[models] {module_name} deshabilitado: {e}")
-        return
-
-    name = getattr(module, "NAME", fallback_name)
-    defaults = getattr(module, "DEFAULTS", {})
-    types = getattr(module, "TYPES", None)
-    if types is None:
-        types = _infer_types_from_defaults(defaults)
-
-    make = getattr(module, "make_model", None) or getattr(module, "make", None)
-    if not callable(make):
-        print(f"[models] {module_name}: no se encontró 'make_model'/'make'; no se registra")
-        return
-
-    REGISTRY[name] = {"types": types, "defaults": defaults, "make": make}
-    print(f"[models] {module_name} registrado como '{name}'")
-
-# --- Registro de modelos opcionales (no bloquean si fallan) ---
-# vesa_shelf: implementado con trimesh para evitar dependencias extra (cadquery).
-_safe_register("vesa_shelf", "vesa_shelf")
-
-
-# --- Nuevos modelos registrados sin romper los existentes ---
-_safe_register('headset_stand', 'headset_stand')
-_safe_register('laptop_stand', 'laptop_stand')
-_safe_register('wall_hook', 'wall_hook')
