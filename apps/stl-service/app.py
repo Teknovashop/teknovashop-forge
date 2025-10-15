@@ -65,15 +65,29 @@ def _boolean_diff_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trime
 def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness: float) -> trimesh.Trimesh:
     """
     Aplica agujeros como cilindros restados a lo largo de Z.
-    'holes': [{x, y, r}]
+
+    Acepta formatos:
+      - { x, y, r }
+      - { x_mm, y_mm, d_mm }  -> convierte a r = d_mm/2
     """
     if not holes:
         return mesh
+
     base = mesh
     for h in holes:
-        x = float(h.get("x", 0.0))
-        y = float(h.get("y", 0.0))
-        r = max(0.1, float(h.get("r", 1.0)))
+        # soporta x / x_mm, y / y_mm
+        x = float(h.get("x", h.get("x_mm", 0.0)))
+        y = float(h.get("y", h.get("y_mm", 0.0)))
+
+        # soporta r directo o d / d_mm -> r
+        if "r" in h:
+            r = float(h.get("r", 1.0))
+        else:
+            d = h.get("d", h.get("d_mm", None))
+            r = float(d) * 0.5 if d is not None else 1.0
+
+        r = max(0.1, float(r))
+
         cyl = cylinder(radius=r, height=max(thickness * 2.5, 5.0), sections=48)
         cyl.apply_translation((x, y, cyl.extents[2] * 0.5))
         diff = _boolean_diff_safe(base, cyl)
@@ -177,7 +191,16 @@ async def generate(payload: GeneratePayload):
         mesh.export(f, file_type="stl")
         stl_bytes = f.getvalue()
 
+    # --- subida a Supabase Storage (firma correcta) ---
     filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
-    uploaded = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # devuelve dict con 'url'
-    url = (uploaded or {}).get("url")
+    bucket = os.getenv("SUPABASE_BUCKET", "forge-stl")
+    object_key = f"{slug}/{filename}"  # carpeta por modelo
+    url = upload_and_get_url(
+        stl_bytes,
+        object_key=object_key,
+        bucket=bucket,
+        public=False,               # firmada; pon True si quieres pública
+        content_type="model/stl",
+    )
+
     return {"ok": True, "slug": slug, "url": url}
