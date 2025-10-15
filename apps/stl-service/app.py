@@ -2,7 +2,7 @@
 import io
 import os
 import math
-from typing import List, Optional, Callable, Dict, Any, Iterable
+from typing import List, Optional, Callable, Dict, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +12,7 @@ import numpy as np
 import trimesh
 from trimesh.creation import box, cylinder
 
-# ---- Supabase helpers (tuyos) ----
+# ---- Supabase helpers (los tuyos) ----
 from supabase_client import upload_and_get_url
 
 # ============================================================
@@ -20,6 +20,9 @@ from supabase_client import upload_and_get_url
 # ============================================================
 
 def _hole_get(h: Any, key: str, default: float = 0.0) -> float:
+    """
+    Lee un campo de un 'hole' que puede ser un dict o un BaseModel.
+    """
     if isinstance(h, dict):
         v = h.get(key, default)
     else:
@@ -30,112 +33,109 @@ def _hole_get(h: Any, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
-def _as_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
-    if isinstance(obj, trimesh.Trimesh):
-        return obj
-    if isinstance(obj, trimesh.Scene):
-        return obj.dump(concatenate=True)
+def _boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    """
+    Boolean difference con distintos motores. Devuelve None si todos fallan.
+    """
+    try:
+        res = a.difference(b)
+        if isinstance(res, trimesh.Trimesh):
+            return res
+        if isinstance(res, trimesh.Scene):
+            return res.dump(concatenate=True)
+    except Exception:
+        pass
+
+    try:
+        from trimesh import boolean
+        res = boolean.difference([a, b], engine=None)
+        if isinstance(res, trimesh.Trimesh):
+            return res
+        if isinstance(res, list) and len(res) > 0 and isinstance(res[0], trimesh.Trimesh):
+            return trimesh.util.concatenate(res)
+        if isinstance(res, trimesh.Scene):
+            return res.dump(concatenate=True)
+    except Exception:
+        pass
+
     return None
 
 
 def _boolean_union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """
+    Unión robusta con fallbacks. Si falla, concatena pura.
+    """
     meshes = [m for m in meshes if isinstance(m, trimesh.Trimesh)]
     if not meshes:
         return trimesh.Trimesh()
     if len(meshes) == 1:
         return meshes[0]
+
     try:
         from trimesh import boolean
         res = boolean.union(meshes, engine=None)
-        m = _as_mesh(res)
-        if m is not None:
-            return m
+        if isinstance(res, trimesh.Trimesh):
+            return res
         if isinstance(res, list) and len(res) > 0:
-            return trimesh.util.concatenate([_as_mesh(x) or x for x in res])
+            return trimesh.util.concatenate(res)
+        if isinstance(res, trimesh.Scene):
+            return res.dump(concatenate=True)
     except Exception:
         pass
+
     return trimesh.util.concatenate(meshes)
 
 
-def _boolean_diff(a: trimesh.Trimesh, b_or_list: Any) -> Optional[trimesh.Trimesh]:
-    cutters: List[trimesh.Trimesh] = []
-    if isinstance(b_or_list, (list, tuple)):
-        for el in b_or_list:
-            m = _as_mesh(el)
-            if isinstance(el, trimesh.Trimesh):
-                cutters.append(el)
-            elif m is not None:
-                cutters.append(m)
-    else:
-        m = _as_mesh(b_or_list)
-        if isinstance(b_or_list, trimesh.Trimesh):
-            cutters.append(b_or_list)
-        elif m is not None:
-            cutters.append(m)
-
-    current = a
-    try:
-        for c in cutters:
-            res = current.difference(c)
-            m = _as_mesh(res)
-            if m is None:
-                raise RuntimeError("difference fallback")
-            current = m
-        return current
-    except Exception:
-        pass
-
-    try:
-        from trimesh import boolean
-        if cutters:
-            res = boolean.difference([current] + cutters, engine=None)
-        else:
-            res = current
-        m = _as_mesh(res)
-        if m is not None:
-            return m
-        if isinstance(res, list) and len(res) > 0:
-            return trimesh.util.concatenate([_as_mesh(x) or x for x in res])
-    except Exception:
-        pass
-
-    return None
-
-
 def _apply_top_holes(solid: trimesh.Trimesh, holes: List[Any], L: float, W: float, H: float) -> trimesh.Trimesh:
+    """
+    Taladros pasantes desde la cara superior (Z+) con diámetro d_mm y
+    coordenadas (x_mm, y_mm) en el plano superior (0..L, 0..W).
+    Si los motores CSG fallan, deja la pieza tal cual (no rompe).
+    """
     current = solid
     for h in holes or []:
         d_mm = _hole_get(h, "d_mm", 0.0)
         if d_mm <= 0:
             continue
         r = max(0.05, d_mm * 0.5)
-        x_mm = _hole_get(h, "x_mm", 0.0)
-        y_mm = _hole_get(h, "y_mm", 0.0)
+
+        x_mm = _hole_get(h, "x_mm", 0.0)  # 0..L
+        y_mm = _hole_get(h, "y_mm", 0.0)  # 0..W
+
+        # coords centradas del mesh
         cx = x_mm - L * 0.5
         cy = y_mm - W * 0.5
+
         drill = cylinder(radius=r, height=max(H * 1.5, 20.0), sections=64)
         drill.apply_translation((cx, cy, H * 0.5))
+
         diff = _boolean_diff(current, drill)
         if diff is not None:
             current = diff
         else:
-            print("[WARN] No se pudo aplicar un agujero (CSG no disponible).")
+            print("[WARN] No se pudo aplicar un agujero (CSG no disponible). Continuo…")
+
     return current
 
 
 def _apply_rounding_if_possible(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
+    """
+    Fillet/chaflán aproximado. Si no hay manifold3d, ignora (no rompe).
+    """
     r = float(fillet_mm or 0.0)
     if r <= 0.0:
         return mesh
+
     try:
         import manifold3d as m3d
         man = m3d.Manifold(mesh)
-        smooth = man.Erode(r).Dilate(r)
+        smooth = man.Erode(r).Dilate(r)  # closing morfológico
         out = smooth.to_trimesh()
         if isinstance(out, trimesh.Trimesh):
             return out
     except Exception:
         print("[INFO] Fillet ignorado (manifold3d no disponible o falló).")
+
     return mesh
 
 
@@ -144,9 +144,12 @@ def _export_stl(mesh_or_scene: trimesh.Trimesh | trimesh.Scene) -> bytes:
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
 
 
-# ------------------------- Render PNG (cámara arreglada) -------------------------
+# ------------------------- Render PNG -------------------------
 
-def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> trimesh.Scene:
+def _frame_scene_for_mesh(mesh: trimesh.Trimesh) -> trimesh.Scene:
+    """
+    Crea una escena con cámara y 'look_at' para enmarcar el mesh.
+    """
     scene = trimesh.Scene(mesh)
     bounds = mesh.bounds
     center = bounds.mean(axis=0)
@@ -154,16 +157,19 @@ def _frame_scene_for_mesh(mesh: trimesh.Trimesh, width: int, height: int) -> tri
     diag = float(np.linalg.norm(ext))
     diag = max(diag, 1.0)
 
+    # Cámara: ligeramente elevada y ladeada
     distance = diag * 1.8
-    # FOV debe ser un par (fx, fy) ahora
-    cam = trimesh.scene.cameras.Camera(resolution=(width, height), fov=(60, 45))
-    scene.camera = cam
-
-    from trimesh.transformations import rotation_matrix, translation_matrix
-    rot = rotation_matrix(math.radians(25), [1, 0, 0]) @ rotation_matrix(math.radians(-30), [0, 0, 1])
-    pos = center + np.array([0.0, -distance, distance * 0.6])
-    view = np.linalg.inv(translation_matrix(pos) @ rot)
-    scene.camera_transform = view
+    rot_euler = trimesh.transformations.euler_matrix(
+        math.radians(25),   # pitch
+        math.radians(-30),  # yaw
+        0.0
+    )
+    cam_tf = trimesh.scene.cameras.look_at(
+        points=[center],
+        distance=distance,
+        rotation=rot_euler
+    )
+    scene.camera_transform = cam_tf
     return scene
 
 
@@ -173,8 +179,12 @@ def _render_thumbnail_png(
     height: int = 600,
     background=(245, 246, 248, 255),
 ) -> bytes:
+    """
+    Render offscreen de una miniatura PNG. Si el raster offscreen no está
+    disponible, dibuja un fallback con PIL.
+    """
     try:
-        scene = _frame_scene_for_mesh(mesh, width, height)
+        scene = _frame_scene_for_mesh(mesh)
         img = scene.save_image(resolution=(width, height), background=background)
         if isinstance(img, (bytes, bytearray)):
             return bytes(img)
@@ -203,89 +213,326 @@ def _render_thumbnail_png(
 
 
 # ============================================================
-#        MODELOS – geometrías base
+#        MODELOS – define aquí cada geometría
 # ============================================================
 
 def mdl_cable_tray(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(1.0, float(p.get("thickness_mm") or 3.0))
-    outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H * 0.5))
-    inner = box(extents=(L - 2 * T, W - 2 * T, H + 2.0)); inner.apply_translation((0, 0, H))
+
+    outer = box(extents=(L, W, H))
+    outer.apply_translation((0, 0, H * 0.5))
+
+    inner = box(extents=(L - 2 * T, W - 2 * T, H + 2.0))
+    inner.apply_translation((0, 0, H))
+
     hollow = _boolean_diff(outer, inner) or outer
     hollow = _apply_top_holes(hollow, holes, L, W, H)
     return hollow
 
 
 def mdl_vesa_adapter(p: dict, holes: List[Any]) -> trimesh.Trimesh:
-    L, W = float(p["length_mm"]), float(p["width_mm"])
+    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(2.0, float(p.get("thickness_mm") or 4.0))
-    plate = box(extents=(L, W, T)); plate.apply_translation((0, 0, T * 0.5))
-    return _apply_top_holes(plate, holes, L, W, T)
+    H = max(H, T)
+
+    plate = box(extents=(L, W, T))
+    plate.apply_translation((0, 0, T * 0.5))
+
+    plate = _apply_top_holes(plate, holes, L, W, T)
+    return plate
 
 
 def mdl_router_mount(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(2.0, float(p.get("thickness_mm") or 3.0))
-    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T * 0.5))
-    vertical = box(extents=(L, T, H)); vertical.apply_translation((0, (W * 0.5 - T * 0.5), H * 0.5))
+
+    base = box(extents=(L, W, T))
+    base.apply_translation((0, 0, T * 0.5))
+
+    vertical = box(extents=(L, T, H))
+    vertical.apply_translation((0, (W * 0.5 - T * 0.5), H * 0.5))
+
     mesh = _boolean_union([base, vertical])
-    return _apply_top_holes(mesh, holes, L, W, max(H, T))
+    mesh = _apply_top_holes(mesh, holes, L, W, max(H, T))
+    return mesh
 
 
 def mdl_camera_mount(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(2.0, float(p.get("thickness_mm") or 3.0))
-    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T * 0.5))
+
+    base = box(extents=(L, W, T))
+    base.apply_translation((0, 0, T * 0.5))
+
     col_h = min(max(H - T, 10.0), H)
-    col = box(extents=(T * 2.0, T * 2.0, col_h)); col.apply_translation((0, 0, T + col_h * 0.5))
+    col = box(extents=(T * 2.0, T * 2.0, col_h))
+    col.apply_translation((0, 0, T + col_h * 0.5))
+
     mesh = _boolean_union([base, col])
-    return _apply_top_holes(mesh, holes, L, W, T + col_h)
+    mesh = _apply_top_holes(mesh, holes, L, W, T + col_h)
+    return mesh
 
 
 def mdl_wall_bracket(p: dict, holes: List[Any]) -> trimesh.Trimesh:
     L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
     T = max(3.0, float(p.get("thickness_mm") or 4.0))
-    horiz = box(extents=(L, W, T)); horiz.apply_translation((0, 0, T * 0.5))
-    vert = box(extents=(T, W, H)); vert.apply_translation((L * 0.5 - T * 0.5, 0, H * 0.5))
-    mesh = _boolean_union([horiz, vert])
-    return _apply_top_holes(mesh, holes, L, W, max(H, T))
 
+    horiz = box(extents=(L, W, T))
+    horiz.apply_translation((0, 0, T * 0.5))
+
+    vert = box(extents=(T, W, H))
+    vert.apply_translation((L * 0.5 - T * 0.5, 0, H * 0.5))
+
+    mesh = _boolean_union([horiz, vert])
+    mesh = _apply_top_holes(mesh, holes, L, W, max(H, T))
+    return mesh
+
+
+# --------- NUEVOS: fan_guard y desk_hook (para evitar 500 y dar soporte) ---------
 
 def mdl_fan_guard(p: dict, holes: List[Any]) -> trimesh.Trimesh:
-    D_out = float(p["length_mm"]); D_in = float(p["width_mm"])
-    Tz = max(2.0, float(p.get("height_mm") or 4.0))
-    R_out = max(1.0, D_out * 0.5); R_in = max(0.1, D_in * 0.5)
-    if R_in >= R_out: R_in = R_out * 0.6
+    """
+    Aro para ventilador: anillo (cilindro hueco) con grosor T.
+    length_mm ~ diámetro exterior, width_mm ~ diámetro interior (o usa holes para tornillos si quieres).
+    height_mm ~ espesor/densidad (Z).
+    """
+    D_out = float(p["length_mm"])
+    D_in = float(p["width_mm"])
+    Tz = max(2.0, float(p.get("height_mm") or 4.0))  # espesor Z
+
+    R_out = max(1.0, D_out * 0.5)
+    R_in = max(0.1, D_in * 0.5)
+    if R_in >= R_out:
+        R_in = R_out * 0.6  # seguridad
+
     outer = cylinder(radius=R_out, height=Tz, sections=96)
     inner = cylinder(radius=R_in, height=Tz + 2.0, sections=96)
+    inner.apply_translation((0, 0, 0.0))
+
     ring = _boolean_diff(outer, inner) or outer
+    # agujeros opcionales en el aro (top view)
     ring = _apply_top_holes(ring, holes, D_out, D_out, Tz)
     ring.apply_translation((0, 0, Tz * 0.5))
     return ring
 
 
 def mdl_desk_hook(p: dict, holes: List[Any]) -> trimesh.Trimesh:
-    L = float(p["length_mm"]); W = float(p["width_mm"]); H = float(p["height_mm"])
+    """
+    Gancho sencillo de mesa: placa + brazo + punta redondeada.
+    length_mm = largo placa; width_mm = ancho; height_mm = alto/alcance del brazo.
+    thickness_mm = grosor de placa y brazo.
+    """
+    L = float(p["length_mm"])
+    W = float(p["width_mm"])
+    H = float(p["height_mm"])
     T = max(3.0, float(p.get("thickness_mm") or 4.0))
-    base = box(extents=(L, W, T)); base.apply_translation((0, 0, T * 0.5))
+
+    # Placa base
+    base = box(extents=(L, W, T))
+    base.apply_translation((0, 0, T * 0.5))
+
+    # Brazo (sale por el centro hacia +Y)
     arm_len = max(W * 0.6, 20.0)
-    arm = box(extents=(T * 1.2, arm_len, T)); arm.apply_translation((0, (W * 0.5 - arm_len * 0.5), T * 0.5))
+    arm = box(extents=(T * 1.2, arm_len, T))
+    arm.apply_translation((0, (W * 0.5 - arm_len * 0.5), T * 0.5))
+
+    # Punta redondeada (cilindro lateral)
     tip_r = max(T * 0.6, 3.0)
     tip = cylinder(radius=tip_r, height=T * 1.2, sections=64)
+    # giramos el cilindro para que el eje esté en X (ponemos "tumbado")
     tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
     tip.apply_translation((0, (W * 0.5 + tip_r * 0.8), T * 0.5))
+
     mesh = _boolean_union([base, arm, tip])
-    return _apply_top_holes(mesh, holes, L, W, max(H, T))
+    mesh = _apply_top_holes(mesh, holes, L, W, max(H, T))
+    return mesh
 
 
+# Registro de modelos
+
+
+# ---- Nuevos modelos ligeros (no rompen dependencias) ----
+def mdl_headset_stand(p: dict, holes) -> trimesh.Trimesh:
+    # Base
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    base.apply_translation((0, p["thickness_mm"]/2.0, 0))
+    # Mástil
+    mast = box(extents=(p["thickness_mm"]*3.0, p["height_mm"], p["thickness_mm"]))
+    mast.apply_translation((0, p["thickness_mm"] + p["height_mm"]/2.0, -p["width_mm"]/2.0 + p["thickness_mm"]*2.0))
+    # Yoke superior simple
+    y = p["length_mm"]*0.6; r = p["length_mm"]*0.25; t = p["thickness_mm"]
+    bridge = box(extents=(2*r + t, t, y))
+    bridge.apply_translation((0, p["thickness_mm"] + p["height_mm"], -p["width_mm"]/2.0 + t*2.0))
+    return _boolean_union([base, mast, bridge])
+
+def mdl_laptop_stand(p: dict, holes) -> trimesh.Trimesh:
+    import shapely.geometry as sg
+    # Costillas laterales
+    poly = sg.Polygon([(0,0), (0,p["height_mm"]), (p["width_mm"], p["height_mm"]*0.6)])
+    rib = trimesh.creation.extrude_polygon(poly, p["thickness_mm"])
+    rib.apply_translation((-p["length_mm"]/2.0, 0, -p["width_mm"]/2.0))
+    rib2 = rib.copy(); rib2.apply_translation((p["length_mm"] - p["thickness_mm"], 0, 0))
+    # Superficie superior y labio
+    top = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.0))
+    top.apply_translation((0, p["height_mm"], -p["width_mm"]/2.0 + p["width_mm"]*0.6))
+    lip = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*1.5))
+    lip.apply_translation((0, p["thickness_mm"]*1.5, -p["width_mm"]/2.0 + p["thickness_mm"]*2.0))
+    # Base trasera
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.5))
+    base.apply_translation((0, p["thickness_mm"]/2.0, p["width_mm"]/2.0 - p["thickness_mm"]*1.25))
+    return _boolean_union([rib, rib2, top, lip, base])
+
+def mdl_wall_hook(p: dict, holes) -> trimesh.Trimesh:
+    # Placa
+    plate = box(extents=(p["width_mm"], p["thickness_mm"], p["length_mm"]))
+    plate.apply_translation((0, p["thickness_mm"]/2.0, 0))
+    # Brazo
+    arm = box(extents=(p["thickness_mm"], p["thickness_mm"], p["height_mm"]*0.75))
+    arm.apply_translation((0, p["thickness_mm"]/2.0 + p["thickness_mm"], p["height_mm"]*0.75/2.0))
+    tip = cylinder(radius=p["thickness_mm"]/2.0, height=p["thickness_mm"], sections=64)
+    tip.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2, [1,0,0]))
+    tip.apply_translation((0, p["thickness_mm"], p["height_mm"]*0.75))
+    gusset = box(extents=(p["width_mm"]*0.6, p["thickness_mm"], p["height_mm"]*0.4))
+    gusset.apply_translation((0, p["thickness_mm"]/2.0, p["height_mm"]*0.2))
+    return _boolean_union([plate, arm, tip, gusset])
+
+
+# ---- Bloque 2 de modelos (ligeros) ----
+def mdl_tablet_stand(p: dict, holes) -> trimesh.Trimesh:
+    import shapely.geometry as sg
+    # costillas laterales para ángulo más vertical
+    poly = sg.Polygon([(0,0), (0,p["height_mm"]), (p["width_mm"]*0.7, p["height_mm"]*0.85)])
+    rib = trimesh.creation.extrude_polygon(poly, p["thickness_mm"])
+    rib.apply_translation((-p["length_mm"]/2.0, 0, -p["width_mm"]/2.0))
+    rib2 = rib.copy(); rib2.apply_translation((p["length_mm"] - p["thickness_mm"], 0, 0))
+    # bandeja de apoyo
+    tray = box(extents=(p["length_mm"], p["thickness_mm"]*2.0, p["width_mm"]*0.5))
+    tray.apply_translation((0, p["height_mm"]*0.85, -p["width_mm"]/2.0 + p["width_mm"]*0.35))
+    # labio frontal
+    lip = box(extents=(p["length_mm"], p["thickness_mm"], p["thickness_mm"]*2.0))
+    lip.apply_translation((0, p["height_mm"]*0.85 + p["thickness_mm"], -p["width_mm"]/2.0 + p["width_mm"]*0.1))
+    return _boolean_union([rib, rib2, tray, lip])
+
+def mdl_ssd_holder(p: dict, holes) -> trimesh.Trimesh:
+    # bandeja 2.5": 100x70mm internas aprox
+    innerL, innerW = 100.0, 70.0
+    t = p["thickness_mm"]
+    base = box(extents=(innerL + 2*t, t, innerW + 2*t)); base.apply_translation((0, t/2, 0))
+    wallL = box(extents=(t, t*8, innerW + 2*t))
+    w1 = wallL.copy(); w1.apply_translation((-(innerL+2*t)/2 + t/2, t*4.5, 0))
+    w2 = wallL.copy(); w2.apply_translation(((innerL+2*t)/2 - t/2, t*4.5, 0))
+    wallW = box(extents=(innerL, t*8, t))
+    w3 = wallW.copy(); w3.apply_translation((0, t*4.5, -(innerW+2*t)/2 + t/2))
+    mesh = _boolean_union([base, w1, w2, w3])
+    return mesh
+
+def mdl_raspi_case(p: dict, holes) -> trimesh.Trimesh:
+    # Base + paredes perimetrales + 4 postes internos
+    L, W, H, t = p["length_mm"], p["width_mm"], p["height_mm"], p["thickness_mm"]
+    base = box(extents=(L, t, W)); base.apply_translation((0, t/2, 0))
+    wall = box(extents=(L, H, t)); w1 = wall.copy(); w1.apply_translation((0, H/2 + t, -(W/2 - t/2)))
+    w2 = wall.copy(); w2.apply_translation((0, H/2 + t, (W/2 - t/2)))
+    wall2 = box(extents=(t, H, W)); w3 = wall2.copy(); w3.apply_translation((-(L/2 - t/2), H/2 + t, 0))
+    w4 = wall2.copy(); w4.apply_translation(((L/2 - t/2), H/2 + t, 0))
+    post = cylinder(radius=t*0.6, height=H, sections=32)
+    p1 = post.copy(); p1.apply_translation((-L*0.35, H/2 + t, -W*0.35))
+    p2 = post.copy(); p2.apply_translation(( L*0.35, H/2 + t, -W*0.35))
+    p3 = post.copy(); p3.apply_translation((-L*0.35, H/2 + t,  W*0.35))
+    p4 = post.copy(); p4.apply_translation(( L*0.35, H/2 + t,  W*0.35))
+    return _boolean_union([base, w1, w2, w3, w4, p1, p2, p3, p4])
+
+def mdl_go_pro_mount(p: dict, holes) -> trimesh.Trimesh:
+    # placa base + horquilla de 3 púas
+    base = box(extents=(p["length_mm"], p["thickness_mm"]*2, p["width_mm"]*0.4))
+    base.apply_translation((0, p["thickness_mm"], 0))
+    prong = box(extents=(p["thickness_mm"], p["thickness_mm"]*2, p["width_mm"]*0.4))
+    a = prong.copy(); a.apply_translation((-p["thickness_mm"], p["thickness_mm"], 0))
+    b = prong.copy(); b.apply_translation((0, p["thickness_mm"], 0))
+    c = prong.copy(); c.apply_translation((p["thickness_mm"], p["thickness_mm"], 0))
+    return _boolean_union([base, a, b, c])
+
+def mdl_monitor_stand(p: dict, holes) -> trimesh.Trimesh:
+    # plataforma + dos patas
+    top = box(extents=(p["length_mm"], p["thickness_mm"]*2, p["width_mm"]))
+    top.apply_translation((0, p["height_mm"] + p["thickness_mm"], 0))
+    leg = box(extents=(p["thickness_mm"]*3, p["height_mm"], p["width_mm"]*0.8))
+    l1 = leg.copy(); l1.apply_translation((-p["length_mm"]/2 + p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
+    l2 = leg.copy(); l2.apply_translation(( p["length_mm"]/2 - p["thickness_mm"]*3/2, p["height_mm"]/2, 0))
+    return _boolean_union([top, l1, l2])
+
+def mdl_camera_plate(p: dict, holes) -> trimesh.Trimesh:
+    # placa con hueco para tuerca 1/4" (aprox) y ranura
+    plate = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    plate.apply_translation((0, p["thickness_mm"]/2, 0))
+    # ranura longitudinal
+    slot = box(extents=(p["length_mm"]*0.6, p["thickness_mm"]*1.2, p["thickness_mm"]*1.5))
+    slot.apply_translation((0, p["thickness_mm"]/2, 0))
+    out = _boolean_diff(plate, [slot])
+    return out or plate
+
+def mdl_hub_holder(p: dict, holes) -> trimesh.Trimesh:
+    # abrazadera en U simple
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]))
+    base.apply_translation((0, p["thickness_mm"]/2, 0))
+    wall = box(extents=(p["thickness_mm"]*2, p["height_mm"], p["width_mm"]))
+    w1 = wall.copy(); w1.apply_translation((-p["length_mm"]/2 + p["thickness_mm"], p["height_mm"]/2 + p["thickness_mm"], 0))
+    w2 = wall.copy(); w2.apply_translation(( p["length_mm"]/2 - p["thickness_mm"], p["height_mm"]/2 + p["thickness_mm"], 0))
+    return _boolean_union([base, w1, w2])
+
+def mdl_mic_arm_clip(p: dict, holes) -> trimesh.Trimesh:
+    # C-clip: toroide con corte
+    outer = cylinder(radius=p["width_mm"]/2, height=p["thickness_mm"]*2, sections=96)
+    inner = cylinder(radius=p["width_mm"]/2 - p["thickness_mm"], height=p["thickness_mm"]*2.2, sections=96)
+    gap = box(extents=(p["width_mm"], p["height_mm"], p["thickness_mm"]*4))
+    gap.apply_translation((0, p["height_mm"]/2, 0))
+    ring = _boolean_diff(outer, [inner, gap]) or outer
+    return ring
+
+def mdl_phone_dock(p: dict, holes) -> trimesh.Trimesh:
+    # Soporte inclinado sencillo con canal USB-C
+    top = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]*0.5))
+    top.apply_translation((0, p["height_mm"], -p["width_mm"]*0.2))
+    leg = box(extents=(p["thickness_mm"]*3, p["height_mm"], p["thickness_mm"]*2))
+    leg.apply_translation((0, p["height_mm"]/2, -p["width_mm"]/2 + p["thickness_mm"]*2))
+    base = box(extents=(p["length_mm"], p["thickness_mm"], p["width_mm"]*0.4))
+    base.apply_translation((0, p["thickness_mm"]/2, p["width_mm"]*0.3))
+    channel = box(extents=(p["thickness_mm"], p["thickness_mm"]*1.2, p["thickness_mm"]*2.0))
+    channel.apply_translation((0, p["height_mm"]-p["thickness_mm"], -p["width_mm"]*0.2))
+    out = _boolean_union([top, leg, base])
+    out = _boolean_diff(out, [channel]) or out
+    return out
 REGISTRY: Dict[str, Callable[[dict, List[Any]], trimesh.Trimesh]] = {
     "cable_tray": mdl_cable_tray,
     "vesa_adapter": mdl_vesa_adapter,
     "router_mount": mdl_router_mount,
     "camera_mount": mdl_camera_mount,
     "wall_bracket": mdl_wall_bracket,
-    "fan_guard": mdl_fan_guard,
-    "desk_hook": mdl_desk_hook,
+    "fan_guard": mdl_fan_guard,   # nuevo
+    "desk_hook": mdl_desk_hook,   # nuevo
+
+    "headset_stand": mdl_headset_stand,
+    "laptop_stand": mdl_laptop_stand,
+    "wall_hook": mdl_wall_hook,
+
+
+    "tablet_stand": mdl_tablet_stand,
+
+    "ssd_holder": mdl_ssd_holder,
+
+    "raspi_case": mdl_raspi_case,
+
+    "go_pro_mount": mdl_go_pro_mount,
+
+    "monitor_stand": mdl_monitor_stand,
+
+    "camera_plate": mdl_camera_plate,
+
+    "hub_holder": mdl_hub_holder,
+
+    "mic_arm_clip": mdl_mic_arm_clip,
+
+    "phone_dock": mdl_phone_dock,
 }
 
 # ============================================================
@@ -309,17 +556,14 @@ class Params(BaseModel):
     fillet_mm: Optional[float] = Field(default=0, ge=0)
 
 class GenerateReq(BaseModel):
-    model: str
+    model: str = Field(..., description="cable_tray | vesa_adapter | router_mount | camera_mount | wall_bracket | fan_guard | desk_hook")
     params: Params
     holes: Optional[List[Hole]] = []
-    outputs: Optional[List[str]] = None
-    operations: Optional[List[Dict[str, Any]]] = None
 
 class GenerateRes(BaseModel):
     stl_url: str
     object_key: str
-    thumb_url: Optional[str] = None
-    svg_url: Optional[str] = None
+    thumb_url: Optional[str] = None  # miniatura
 
 app = FastAPI(title="Teknovashop Forge")
 
@@ -335,176 +579,7 @@ app.add_middleware(
 def health():
     return {"ok": True, "models": list(REGISTRY.keys())}
 
-# ------------------------------------------------------------
-#      TEXT helper (fallback con matplotlib)
-# ------------------------------------------------------------
-
-def _text_to_mesh(
-    text: str,
-    size_mm: float,
-    depth_mm: float,
-) -> Optional[trimesh.Trimesh]:
-    try:
-        from matplotlib.textpath import TextPath
-        from shapely.geometry import Polygon
-        from shapely.ops import unary_union
-
-        tp = TextPath((0, 0), text, size=size_mm)
-        polys: Iterable[np.ndarray] = tp.to_polygons(closed_only=True)
-
-        solids: List[trimesh.Trimesh] = []
-        for poly in polys:
-            if len(poly) < 3:
-                continue
-            shp = Polygon(poly).buffer(0)
-            if shp.is_empty:
-                continue
-            if shp.geom_type == "Polygon":
-                solids.append(trimesh.creation.extrude_polygon(shp, height=depth_mm))
-            else:
-                merged = unary_union(shp)
-                if merged.geom_type == "Polygon":
-                    solids.append(trimesh.creation.extrude_polygon(merged, height=depth_mm))
-                else:
-                    for g in getattr(merged, "geoms", []):
-                        if g.geom_type == "Polygon":
-                            solids.append(trimesh.creation.extrude_polygon(g, height=depth_mm))
-        if not solids:
-            return None
-        return _boolean_union(solids)
-    except Exception as e:
-        print("[WARN] Fallback TEXT via matplotlib falló:", e)
-        return None
-
-# ------------------------------------------------------------
-#      OPERACIONES UNIVERSALES (fix Z-top)
-# ------------------------------------------------------------
-
-def _mk_cutout(shape: str, x: float, y: float, L: float, W: float,
-               depth: float, z_center: float,
-               d: Optional[float] = None,
-               w: Optional[float] = None, h: Optional[float] = None) -> trimesh.Trimesh:
-    cx = x - L * 0.5
-    cy = y - W * 0.5
-    depth = max(depth, 0.1)
-    if (shape or "").lower() == "circle":
-        r = max(0.05, (float(d or 0.0) * 0.5))
-        cutter = cylinder(radius=r, height=depth, sections=64)
-        cutter.apply_translation((cx, cy, z_center))
-        return cutter
-    else:
-        ww = max(0.1, float(w or 0.0))
-        hh = max(0.1, float(h or 0.0))
-        cutter = box(extents=(ww, hh, depth))
-        cutter.apply_translation((cx, cy, z_center))
-        return cutter
-
-
-def _apply_operations(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]],
-                      L: float, W: float, H: float) -> trimesh.Trimesh:
-    if not ops:
-        return mesh
-
-    current = mesh
-    cutters: List[trimesh.Trimesh] = []
-    unions: List[trimesh.Trimesh] = []
-    extra_fillet: float = 0.0
-
-    # Z real del tope de la pieza
-    topZ = float(current.bounds[1][2])
-
-    for op in ops:
-        t = (op.get("type") or "").lower()
-
-        if t == "round":
-            extra_fillet = max(extra_fillet, float(op.get("r_mm") or op.get("r") or 0.0))
-            continue
-
-        if t == "cutout":
-            shape = (op.get("shape") or "circle").lower()
-            depth = float(op.get("depth_mm") or H)
-            # centramos el cutter a topZ - depth/2 para recortar desde arriba
-            zc = topZ - depth * 0.5
-            c = _mk_cutout(
-                shape=shape,
-                x=float(op.get("x_mm") or 0.0),
-                y=float(op.get("y_mm") or 0.0),
-                L=L, W=W, depth=depth, z_center=zc,
-                d=op.get("d_mm"),
-                w=op.get("w_mm"), h=op.get("h_mm"),
-            )
-            cutters.append(c)
-            continue
-
-        if t == "array":
-            shape = (op.get("shape") or "circle").lower()
-            nx = max(1, int(op.get("nx") or 1))
-            ny = max(1, int(op.get("ny") or 1))
-            dx = float(op.get("dx_mm") or 10.0)
-            dy = float(op.get("dy_mm") or 10.0)
-            start_x = float(op.get("start_x_mm") or 0.0)
-            start_y = float(op.get("start_y_mm") or 0.0)
-            depth = float(op.get("depth_mm") or H)
-            zc = topZ - depth * 0.5
-            for ix in range(nx):
-                for iy in range(ny):
-                    x = start_x + ix * dx
-                    y = start_y + iy * dy
-                    c = _mk_cutout(shape=shape, x=x, y=y, L=L, W=W, depth=depth, z_center=zc,
-                                   d=op.get("d_mm"), w=op.get("w_mm"), h=op.get("h_mm"))
-                    cutters.append(c)
-            continue
-
-        if t == "text":
-            txt = str(op.get("text") or "").strip()
-            if not txt:
-                continue
-            size = max(1.0, float(op.get("size_mm") or 10.0))
-            depth = max(0.2, float(op.get("depth_mm") or 1.0))
-            x = float(op.get("x_mm") or 0.0)
-            y = float(op.get("y_mm") or 0.0)
-            engrave = bool(op.get("engrave", True))
-
-            txt_mesh = _text_to_mesh(txt, size, depth)
-            if txt_mesh is not None:
-                bb = txt_mesh.bounds
-                sx = x - L * 0.5 - (bb[0][0])
-                sy = y - W * 0.5 - (bb[0][1])
-                sz = topZ - depth * 0.5  # ← grabar DESDE ARRIBA
-                txt_mesh.apply_translation((sx, sy, sz))
-                if engrave:
-                    cutters.append(txt_mesh)
-                else:
-                    unions.append(txt_mesh)
-            else:
-                print("[WARN] No se pudo generar el texto; se omite.")
-
-    if unions:
-        current = _boolean_union([current] + unions)
-
-    if cutters:
-        diff = _boolean_diff(current, cutters)
-        if diff is not None:
-            current = diff
-        else:
-            print("[WARN] difference batch falló; aplicando por piezas…")
-            for c in cutters:
-                tmp = _boolean_diff(current, c)
-                if tmp is not None:
-                    current = tmp
-
-    if extra_fillet > 0.0:
-        current = _apply_rounding_if_possible(current, extra_fillet)
-
-    return current
-
-# ------------------------- Generate -------------------------
-
-class GenerateRes(BaseModel):
-    stl_url: str
-    object_key: str
-    thumb_url: Optional[str] = None
-    svg_url: Optional[str] = None
+# ------------------------- Generate STL + PNG -------------------------
 
 @app.post("/generate", response_model=GenerateRes)
 def generate(req: GenerateReq):
@@ -516,6 +591,7 @@ def generate(req: GenerateReq):
         "fillet_mm": req.params.fillet_mm or 0.0,
     }
 
+    # normaliza nombres
     candidates = {
         req.model,
         req.model.replace("-", "_"),
@@ -526,31 +602,31 @@ def generate(req: GenerateReq):
     }
 
     builder: Optional[Callable[[dict, List[Any]], trimesh.Trimesh]] = None
-    chosen = None
     for k in candidates:
         if k in REGISTRY:
-            builder = REGISTRY[k]; chosen = k; break
+            builder = REGISTRY[k]
+            break
     if builder is None:
         raise RuntimeError(f"Modelo desconocido: {req.model}. Disponibles: {', '.join(REGISTRY.keys())}")
 
+    # Construye la malla base
     mesh = builder(p, req.holes or [])
 
+    # Fillet / chaflán aproximado si procede
     f = float(p.get("fillet_mm") or 0.0)
     if f > 0:
         mesh = _apply_rounding_if_possible(mesh, f)
 
-    try:
-        mesh = _apply_operations(mesh, req.operations or [], p["length_mm"], p["width_mm"], p["height_mm"])
-    except Exception as e:
-        print("[WARN] Falló _apply_operations:", e)
-
+    # Exportar STL
     stl_bytes = _export_stl(mesh)
     stl_buf = io.BytesIO(stl_bytes); stl_buf.seek(0)
 
-    base_key = (chosen or req.model).replace("_", "-")
+    # Guardar en Supabase
+    base_key = req.model.replace("_", "-")
     object_key = f"{base_key}/forge-output.stl"
     stl_url = upload_and_get_url(stl_buf, object_key, bucket=BUCKET, public=PUBLIC_READ)
 
+    # Render PNG y subir
     thumb_url = None
     try:
         png_bytes = _render_thumbnail_png(mesh, width=900, height=600, background=(245, 246, 248, 255))
@@ -561,23 +637,9 @@ def generate(req: GenerateReq):
     except Exception as e:
         print("[WARN] No se pudo generar miniatura:", e)
 
-    svg_url = None
-    try:
-        want_svg = bool(req.outputs and any(o.lower() == "svg" for o in req.outputs))
-        if want_svg and (chosen or req.model).replace("-", "_") == "cable_tray":
-            from models.cable_tray import make_svg as cable_tray_make_svg
-            svg_text = cable_tray_make_svg(p, req.holes or [])
-            if svg_text:
-                svg_buf = io.BytesIO(svg_text.encode("utf-8")); svg_buf.seek(0)
-                svg_key = f"{base_key}/outline.svg"
-                svg_url = upload_and_get_url(svg_buf, svg_key, bucket=BUCKET, public=PUBLIC_READ)
-    except Exception as e:
-        print("[WARN] SVG opcional falló:", e)
+    return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url)
 
-    return GenerateRes(stl_url=stl_url, object_key=object_key, thumb_url=thumb_url, svg_url=svg_url)
-
-
-# ------------------------- Thumbnail -------------------------
+# ------------------------- Solo PNG opcional -------------------------
 
 class ThumbnailReq(BaseModel):
     model: str
@@ -590,6 +652,9 @@ class ThumbnailRes(BaseModel):
 
 @app.post("/thumbnail", response_model=ThumbnailRes)
 def thumbnail(req: ThumbnailReq):
+    """
+    Genera SOLO la miniatura PNG en el bucket, sin guardar STL.
+    """
     gen = generate(GenerateReq(model=req.model, params=req.params, holes=req.holes))
     if not gen.thumb_url:
         raise RuntimeError("No se pudo generar la miniatura.")
