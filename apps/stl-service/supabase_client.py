@@ -1,74 +1,69 @@
+# apps/stl-service/supabase_client.py
+import io
 import os
-from typing import Optional, BinaryIO
-from supabase import create_client, Client
+import time
+from typing import Optional, Dict, Any
 
-SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
-SUPABASE_KEY: Optional[str] = (
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    or os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")
-)
+from supabase import create_client, Client  # supabase-py
 
-if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL no configurada")
-if not SUPABASE_KEY:
-    raise RuntimeError("Falta SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY")
+_SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+_SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+_STORAGE_BUCKET = os.getenv("SUPABASE_BUCKET", "stl")
+_SIGN_SECONDS = int(os.getenv("SUPABASE_SIGN_SECONDS", str(7 * 24 * 3600)))  # 7 días
 
-_SB: Optional[Client] = None
+_supabase: Optional[Client] = None
 
-def get_supabase() -> Client:
-    global _SB
-    if _SB is None:
-        _SB = create_client(SUPABASE_URL, SUPABASE_KEY)
-    return _SB
+
+def _get_client() -> Client:
+    global _supabase
+    if _supabase is None:
+        if not _SUPABASE_URL or not _SUPABASE_KEY:
+            raise RuntimeError("SUPABASE_URL o SUPABASE_*_KEY no configurados")
+        _supabase = create_client(_SUPABASE_URL, _SUPABASE_KEY)
+    return _supabase
+
+
+def _norm_path(*parts: str) -> str:
+    p = "/".join([s.strip("/ ") for s in parts if s is not None and s != ""])
+    return p
+
 
 def upload_and_get_url(
-    fileobj: BinaryIO,
-    object_key: str,
-    bucket: str,
-    public: bool = False,
-    content_type: str = "model/stl",
-) -> str:
+    fileobj: io.BufferedIOBase,
+    *,
+    folder: Optional[str] = None,
+    filename: str = "output.stl",
+) -> Dict[str, Any]:
     """
-    Sube a Supabase Storage con el SDK oficial.
-    - `file` como BYTES (no BytesIO) para evitar open().
-    - `upsert` debe ser STRING "true" (headers no aceptan bool).
-    - Devuelve URL pública o firmada (1h por defecto).
+    Sube el contenido de `fileobj` al bucket y devuelve una URL firmada.
+    Acepta cualquier file-like que implemente .read().
     """
-    sb = get_supabase()
+    sb = _get_client()
 
-    if not bucket:
-        raise ValueError("bucket vacío")
-    if not object_key:
-        raise ValueError("object_key vacío")
+    # Normaliza ruta: <folder>/<filename>
+    path = _norm_path(folder or "", filename)
 
-    try:
-        fileobj.seek(0)
-    except Exception:
-        pass
+    # Lee bytes (adm. también que te pasen bytes por error)
+    if hasattr(fileobj, "read"):
+        data = fileobj.read()
+    else:
+        # si llega un bytes/bytearray por compatibilidad
+        data = bytes(fileobj)
 
-    data = fileobj.read()
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-
-    # ⬅️ clave: upsert como "true" (string), y file en bytes
-    sb.storage.from_(bucket).upload(
-        path=object_key,
+    # Subida con overwrite=True para despliegues repetibles
+    _ = sb.storage.from_(_STORAGE_BUCKET).upload(
+        path=path,
         file=data,
-        file_options={"content-type": content_type, "upsert": "true"},
+        file_options={"contentType": "model/stl", "upsert": True},
     )
 
-    if public:
-        return sb.storage.from_(bucket).get_public_url(object_key)
+    # URL firmada
+    signed = sb.storage.from_(_STORAGE_BUCKET).create_signed_url(path, _SIGN_SECONDS)
+    url = signed.get("signedURL") or signed.get("signed_url") or signed.get("url")
 
-    expires = int(os.getenv("SIGNED_URL_EXPIRES", "3600"))
-    signed = sb.storage.from_(bucket).create_signed_url(object_key, expires)
-
-    url = (
-        (isinstance(signed, dict) and (signed.get("signedURL") or signed.get("signed_url") or signed.get("url")))
-        or (str(signed) if signed else None)
-    )
+    # Fallback: URL pública si el bucket es público
     if not url:
-        raise RuntimeError(f"No pude obtener URL firmada: {signed!r}")
-    return url
+        public_url = sb.storage.from_(_STORAGE_BUCKET).get_public_url(path)
+        url = public_url.get("publicURL") or public_url.get("public_url")
+
+    return {"bucket": _STORAGE_BUCKET, "path": path, "url": url}
