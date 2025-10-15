@@ -43,7 +43,6 @@ def _to_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
         try:
             return trimesh.util.concatenate(obj)
         except Exception:
-            # último recurso: devuelve la primera
             return obj[0]
     if isinstance(obj, trimesh.Scene):
         try:
@@ -59,7 +58,6 @@ def _boolean_diff_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trime
             out = trimesh.util.concatenate(out)
         return out
     except Exception:
-        # si falla, no rompemos
         return None
 
 def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness: float) -> trimesh.Trimesh:
@@ -68,24 +66,20 @@ def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness
 
     Acepta formatos:
       - { x, y, r }
-      - { x_mm, y_mm, d_mm }  -> convierte a r = d_mm/2
+      - { x_mm, y_mm, d_mm } -> r = d_mm / 2
     """
     if not holes:
         return mesh
 
     base = mesh
     for h in holes:
-        # soporta x / x_mm, y / y_mm
         x = float(h.get("x", h.get("x_mm", 0.0)))
         y = float(h.get("y", h.get("y_mm", 0.0)))
-
-        # soporta r directo o d / d_mm -> r
         if "r" in h:
             r = float(h.get("r", 1.0))
         else:
-            d = h.get("d", h.get("d_mm", None))
+            d = h.get("d", h.get("d_mm"))
             r = float(d) * 0.5 if d is not None else 1.0
-
         r = max(0.1, float(r))
 
         cyl = cylinder(radius=r, height=max(thickness * 2.5, 5.0), sections=48)
@@ -95,26 +89,20 @@ def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness
     return base
 
 def _apply_rounding_if_possible(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
-    """
-    Fillet/chaflán aproximado con manifold3d si está disponible.
-    Si no, no hace nada (no rompe).
-    """
+    """Fillet/chaflán aproximado con manifold3d si está disponible."""
     r = float(fillet_mm or 0.0)
     if r <= 0.0:
         return mesh
     try:
         import manifold3d as m3d
         man = m3d.Manifold(mesh)
-        smooth = man.Erode(r).Dilate(r)  # cierre morfológico
+        smooth = man.Erode(r).Dilate(r)
         return smooth.to_trimesh() if hasattr(smooth, "to_trimesh") else mesh
     except Exception:
         return mesh
 
 def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.Trimesh:
-    """
-    Aplica arrays de duplicación con desplazamientos (dx, dy).
-    Si algo falla, concatena sin booleanos.
-    """
+    """Duplica la malla con desplazamientos (dx, dy) count-1 veces."""
     if not ops:
         return mesh
     copies = [mesh]
@@ -139,7 +127,7 @@ class GenerateParams(BaseModel):
     thickness_mm: Optional[float] = None
     fillet_mm: Optional[float] = 0.0
     holes: List[Dict[str, float]] = Field(default_factory=list)
-    textOps: List[Dict[str, float]] = Field(default_factory=list)   # placeholder seguro
+    textOps: List[Dict[str, float]] = Field(default_factory=list)   # placeholder
     arrayOps: List[Dict[str, float]] = Field(default_factory=list)
 
 class GeneratePayload(BaseModel):
@@ -174,32 +162,31 @@ async def generate(payload: GeneratePayload):
     if not isinstance(mesh, trimesh.Trimesh):
         return {"ok": False, "error": "Builder did not return a mesh"}
 
-    # Necesario para agujeros: grosor
     thickness = float(params.get("thickness_mm") or 3.0)
 
-    # 2) Post-procesado seguro (no rompe si falla algo)
+    # 2) Post-procesado
     mesh = _apply_holes(mesh, params.get("holes", []), thickness)
     mesh = _apply_array(mesh, params.get("arrayOps", []))
     mesh = _apply_rounding_if_possible(mesh, float(params.get("fillet_mm") or 0.0))
-    # textOps: placeholder sin cambios (hasta habilitar extrusión tipográfica con assets)
+    # textOps: a implementar con fuentes (placeholder)
 
-    # 3) Exportar y subir
+    # 3) Exportar STL
     stl_bytes = mesh.export(file_type="stl") if hasattr(mesh, "export") else b""
     if not stl_bytes:
-        # fallback
-        f = io.BytesIO()
-        mesh.export(f, file_type="stl")
-        stl_bytes = f.getvalue()
+        buf = io.BytesIO()
+        mesh.export(buf, file_type="stl")
+        stl_bytes = buf.getvalue()
 
-    # --- subida a Supabase Storage (firma correcta) ---
+    # 4) Subir a Supabase Storage (usa file-like)
     filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
     bucket = os.getenv("SUPABASE_BUCKET", "forge-stl")
-    object_key = f"{slug}/{filename}"  # carpeta por modelo
+    object_key = f"{slug}/{filename}"
+
     url = upload_and_get_url(
-        stl_bytes,
+        io.BytesIO(stl_bytes),      # <-- file-like correcto
         object_key=object_key,
         bucket=bucket,
-        public=False,               # firmada; pon True si quieres pública
+        public=False,
         content_type="model/stl",
     )
 
