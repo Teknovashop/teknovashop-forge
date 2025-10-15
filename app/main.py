@@ -2,79 +2,186 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, Optional
-import os, uuid
-
+from typing import Dict, Any
+import os, io, uuid, tempfile
+import numpy as np
 import trimesh as tm
-from trimesh.creation import box
 
 from supabase import create_client, Client
 
-# ---------- Config ----------
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl").strip()
-CORS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()] or ["*"]
+# ========= CORS =========
+ALLOWED_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-os.environ.setdefault("TRIMESH_NO_NETWORK", "1")
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+# ========= Supabase =========
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "forge-stl")
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-app = FastAPI(title="Teknovashop Forge API")
-app.add_middleware(CORSMiddleware, allow_origins=CORS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# ========= Utils =========
+def mesh_to_stl_bytes(mesh: tm.Trimesh) -> bytes:
+    f = io.BytesIO()
+    mesh.export(f, file_type="stl")
+    return f.getvalue()
 
-# ---------- Supabase ----------
-supabase: Optional[Client] = None
-if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-  supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+def upload_and_sign(bytes_data: bytes, folder: str, filename: str) -> Dict[str, Any]:
+    key = f"{folder}/{filename}"
+    # subimos
+    sb.storage.from_(SUPABASE_BUCKET).upload(key, bytes_data, {
+        "content-type": "model/stl",
+        "upsert": True,
+    })
+    # firmamos 60 min
+    signed = sb.storage.from_(SUPABASE_BUCKET).create_signed_url(key, 60*60)
+    return {"key": key, "url": signed.get("signedURL")}
 
-def upload_and_sign(stl_bytes: bytes, folder: str, filename: str):
-  if not supabase:
-    raise RuntimeError("Supabase client not configured")
-  key = f"{folder}/{filename}"
-  supabase.storage.from_(SUPABASE_BUCKET).upload(key, stl_bytes, {"content-type": "model/stl", "upsert": True})
-  public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(key)
-  return {"key": key, "url": public_url}
+# ========= Modelos base =========
+class ModelGenerator:
+    slug: str = "base"
 
-# ---------- Models ----------
-def build_vesa_adapter(p: Dict[str, Any]) -> tm.Trimesh:
-  L = float(p.get("length_mm", 120))
-  W = float(p.get("width_mm", 100))
-  T = float(p.get("thickness_mm", 3))
-  plate = box(extents=(L, W, T)); plate.apply_translation((0, 0, T/2.0))
-  return plate
+    def build(self, params: Dict[str, Any]) -> tm.Trimesh:
+        raise NotImplementedError
 
-def build_cable_tray(p: Dict[str, Any]) -> tm.Trimesh:
-  L = float(p.get("length_mm", 120))
-  W = float(p.get("width_mm", 60))
-  H = float(p.get("height_mm", 40))
-  T = float(p.get("thickness_mm", 2))
-  outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H/2))
-  inner = box(extents=(L-2*T, W-2*T, H)); inner.apply_translation((0, 0, H/2 + 0.01))
-  try:
-    return outer.difference(inner)
-  except Exception:
-    return outer
+# --- Modelos de ejemplo paramétricos ---
 
-MODEL_REGISTRY = { "vesa_adapter": build_vesa_adapter, "cable_tray": build_cable_tray }
-def mesh_to_stl_bytes(mesh: tm.Trimesh) -> bytes: return mesh.export(file_type="stl")
+class VesaAdapter(ModelGenerator):
+    """
+    Placa con patrón de agujeros VESA configurable.
+    params:
+      width, height, thickness  -> dimensiones placa (mm)
+      pattern_from, pattern_to  -> (ej. 75 y 100, o 100 y 200)
+      hole_d                    -> diámetro agujero tornillo (mm)
+    """
+    slug = "vesa-adapter"
 
+    def build(self, params: Dict[str, Any]) -> tm.Trimesh:
+        w = float(params.get("width", 120))
+        h = float(params.get("height", 120))
+        t = float(params.get("thickness", 5))
+        p_from = int(params.get("pattern_from", 75))
+        p_to   = int(params.get("pattern_to", 100))
+        hole_d = float(params.get("hole_d", 5))
+
+        plate = tm.creation.box(extents=(w, h, t))
+        plate.apply_translation([0, 0, t/2.0])
+
+        def hole_grid(side):
+            # genera 4 agujeros para un cuadrado de lado 'side' (mm)
+            r = hole_d/2.0
+            # cilindros están alineados en Z. Altura un poco mayor que la placa:
+            cyl = tm.creation.cylinder(radius=r, height=t*1.2, sections=64)
+            cyl.apply_translation([ side/2,  side/2, t/2])
+            c2 = cyl.copy(); c2.apply_translation([-side, 0, 0])
+            c3 = cyl.copy(); c3.apply_translation([0, -side, 0])
+            c4 = cyl.copy(); c4.apply_translation([-side, -side, 0])
+            return tm.util.concatenate([cyl, c2, c3, c4])
+
+        holes_from = hole_grid(p_from)
+        holes_to   = hole_grid(p_to)
+
+        # situamos el centro geométrico en (0,0)
+        plate.apply_translation([-w/2, -h/2, 0])
+
+        # restamos
+        result = plate.difference([holes_from, holes_to], engine="scad" if tm.interfaces.scad.exists else "blender")
+        return result
+
+class RouterMount(ModelGenerator):
+    """
+    Soporte en L (pared/estante).
+    params: base_w, base_h, depth, thickness, hole_d
+    """
+    slug = "router-mount"
+
+    def build(self, params: Dict[str, Any]) -> tm.Trimesh:
+        base_w = float(params.get("base_w", 80))
+        base_h = float(params.get("base_h", 100))
+        depth  = float(params.get("depth", 60))
+        t      = float(params.get("thickness", 4))
+        hole_d = float(params.get("hole_d", 4))
+
+        plate = tm.creation.box((base_w, base_h, t))
+        plate.apply_translation([0, 0, t/2])
+
+        shelf = tm.creation.box((base_w, t, depth))
+        shelf.apply_translation([0, (base_h/2+t/2), depth/2])
+
+        bracket = tm.util.concatenate([plate, shelf])
+        bracket.apply_translation([-base_w/2, -base_h/2, 0])
+
+        # dos agujeros en placa
+        r = hole_d/2
+        c1 = tm.creation.cylinder(r, t*1.4, sections=48); c1.apply_translation([  base_w/4, 0, t/2])
+        c2 = tm.creation.cylinder(r, t*1.4, sections=48); c2.apply_translation([ -base_w/4, 0, t/2])
+
+        result = bracket.difference([c1, c2], engine="scad" if tm.interfaces.scad.exists else "blender")
+        return result
+
+class CableTray(ModelGenerator):
+    """
+    Bandeja en U simple.
+    params: width, depth, wall, height
+    """
+    slug = "cable-tray"
+
+    def build(self, params: Dict[str, Any]) -> tm.Trimesh:
+        w = float(params.get("width", 220))
+        d = float(params.get("depth", 80))
+        wall = float(params.get("wall", 4))
+        h = float(params.get("height", 50))
+
+        outer = tm.creation.box((w, d, h))
+        inner = tm.creation.box((w-2*wall, d-wall, h-wall))
+        inner.apply_translation([0, wall/2, wall/2])
+
+        outer.apply_translation([-w/2, -d/2, 0])
+        inner.apply_translation([-w/2, -d/2, 0])
+
+        tray = outer.difference(inner, engine="scad" if tm.interfaces.scad.exists else "blender")
+        return tray
+
+# ========= Registro de modelos =========
+REGISTRY: Dict[str, ModelGenerator] = {
+    VesaAdapter.slug: VesaAdapter(),
+    RouterMount.slug: RouterMount(),
+    CableTray.slug:  CableTray(),
+    # añade más aquí con el mismo patrón
+}
+
+# ========= Schemas =========
 class GeneratePayload(BaseModel):
-  model: str
-  params: Dict[str, Any] = {}
+    model: str
+    params: Dict[str, Any] = {}
 
+# ========= Endpoints =========
 @app.get("/health")
-def health(): return {"ok": True}
+def health():
+    return {"ok": True}
 
 @app.post("/generate")
 def generate(payload: GeneratePayload):
-  slug = payload.model.replace("-", "_")
-  builder = MODEL_REGISTRY.get(slug)
-  if not builder: raise HTTPException(status_code=404, detail=f"Model '{slug}' not found")
-  try:
-    mesh = builder(payload.params or {})
-  except Exception as e:
-    raise HTTPException(status_code=400, detail=f"Build error: {e}")
-  stl = mesh_to_stl_bytes(mesh)
-  filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
-  uploaded = upload_and_sign(stl, slug, filename)
-  return {"ok": True, "slug": slug, "file": uploaded["key"], "url": uploaded["url"]}
+    slug = payload.model.strip()
+    gen = REGISTRY.get(slug)
+    if not gen:
+        raise HTTPException(status_code=404, detail=f"Model '{slug}' not found")
+
+    try:
+        mesh = gen.build(payload.params or {})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Build error: {e}")
+
+    stl_bytes = mesh_to_stl_bytes(mesh)
+    custom_id = str(uuid.uuid4())[:8]
+    filename = f"custom-{custom_id}.stl"
+
+    # Guardamos en carpeta del modelo dentro del bucket
+    uploaded = upload_and_sign(stl_bytes, slug, filename)
+    return {"ok": True, "slug": slug, "file": uploaded["key"], "url": uploaded["url"]}
