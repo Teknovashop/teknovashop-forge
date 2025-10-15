@@ -1,9 +1,6 @@
 # apps/stl-service/models/__init__.py
 # Registro central de modelos. El backend importa de aquí.
 
-from typing import Any, Dict
-import importlib
-
 # --- Núcleo: modelos existentes (deben estar) ---
 from .vesa_adapter import (
     NAME as vesa_adapter_name,
@@ -49,7 +46,7 @@ from .phone_stand import (
 )
 
 # Mapa principal (estructura establecida en tu proyecto)
-REGISTRY: Dict[str, Dict[str, Any]] = {
+REGISTRY = {
     vesa_adapter_name: {
         "types": vesa_adapter_types,
         "defaults": vesa_adapter_defaults,
@@ -87,8 +84,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# --- Helpers de registro seguro ---
-
+# --- Helper para registrar modelos opcionales de forma segura ---
 def _infer_types_from_defaults(defaults: dict) -> dict:
     """Dada una tabla de DEFAULTS, infiere un mapa de TYPES compatible (str:int/float/bool/str/array/any)."""
     tmap = {}
@@ -109,13 +105,14 @@ def _infer_types_from_defaults(defaults: dict) -> dict:
 
 def _safe_register(module_name: str, fallback_name: str):
     """
-    Importa un submódulo opcional y lo añade al REGISTRY si expone:
-    - NAME, DEFAULTS, (TYPES opcional), y make_model/make.
-    Usa importlib.import_module con package=__name__ para evitar errores de
-    'No module named ".xxx"'.
+    Intenta importar un módulo de modelo opcional y registrarlo en REGISTRY.
+    - Acepta NAME, DEFAULTS, TYPES, y make_model/make.
+    - Si TYPES no existe, lo infiere de DEFAULTS.
+    - Si falla el import, no rompe el arranque.
     """
     try:
-        module = importlib.import_module(f".{module_name}", package=__name__)
+        # Import relativo dentro del paquete
+        module = __import__(f".{module_name}", globals(), locals(), fromlist=["*"])
     except Exception as e:
         print(f"[models] {module_name} deshabilitado: {e}")
         return
@@ -134,19 +131,12 @@ def _safe_register(module_name: str, fallback_name: str):
     REGISTRY[name] = {"types": types, "defaults": defaults, "make": make}
     print(f"[models] {module_name} registrado como '{name}'")
 
-# --- Registro de modelos opcionales (lista para completar 16) ---
-# Añade aquí todos los que tenías en tu repo y deben aparecer en /health
-_optional_modules = [
-    "vesa_shelf",
-    "headset_stand",
-    "laptop_stand",
-    "wall_hook",
-    "camera_mount",
-    "desk_hook",
-    "fan_guard",
-    "camera_plate",
-    "wall_bracket",
-]
+# --- Registro de modelos opcionales (no bloquean si fallan) ---
+# vesa_shelf: implementado con trimesh para evitar dependencias extra (cadquery).
+_safe_register("vesa_shelf", "vesa_shelf")
 
-for _mod in _optional_modules:
-    _safe_register(_mod, _mod)
+
+# --- Nuevos modelos registrados sin romper los existentes ---
+_safe_register('headset_stand', 'headset_stand')
+_safe_register('laptop_stand', 'laptop_stand')
+_safe_register('wall_hook', 'wall_hook')
