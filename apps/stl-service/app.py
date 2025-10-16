@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io, time
-from .models import build_model
+from models import build_model
 from .supabase_client import upload_and_get_url
 
 app = FastAPI()
