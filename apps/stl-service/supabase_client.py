@@ -77,10 +77,15 @@ def upload_and_get_url(
         data = fileobj.read()
 
     # Subida (si existe, sobreescribe)
+    # OJO: la librería espera headers como cadenas; el upsert correcto es "x-upsert": "true"
     client.storage.from_(bucket).upload(
         path=path,
         file=data,
-        file_options={"content-type": mime, "upsert": True},
+        file_options={
+            "content-type": mime,
+            "x-upsert": "true",         # <-- clave del bug (antes: upsert: True)
+            # "cache-control": "3600",  # opcional
+        },
     )
 
     # URL pública (si el bucket es público)…
