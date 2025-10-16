@@ -1,2 +1,4 @@
-# apps/stl-service/asgi.py
-from app import app  # instancia FastAPI, exportada como "app" para uvicorn/render
+# /asgi.py
+from app import app as fastapi_app
+app = fastapi_app
+
