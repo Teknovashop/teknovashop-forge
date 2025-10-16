@@ -3,20 +3,19 @@ import os
 import io
 import uuid
 import base64
-from typing import List, Optional, Dict, Any, Union
+import time
+from typing import List, Optional, Dict, Any, Tuple
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-import numpy as np
 import trimesh
 from trimesh.creation import cylinder, box
 
 from supabase_client import upload_and_get_url
-from models import (
-    REGISTRY,                      # dict: name -> { types, defaults, make/builder }
-)
+from models import REGISTRY  # dict: name -> { types, defaults, make/builder }
 
 # ---------------- CORS ----------------
 origins = os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
@@ -28,6 +27,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------- In-memory STL store (para /stl/{id}) ----------------
+# Guardamos STL unos minutos para que el frontend pueda descargarlo del propio backend.
+_STORE: Dict[str, Tuple[bytes, float]] = {}
+_STORE_MAX = int(os.getenv("STL_STORE_MAX", "200"))
+_STORE_TTL = int(os.getenv("STL_STORE_TTL_SEC", "900"))  # 15 min
+
+def _store_put(data: bytes) -> str:
+    # limpieza rápida por tamaño
+    if len(_STORE) >= _STORE_MAX:
+        # borra el más antiguo
+        oldest = min(_STORE.items(), key=lambda kv: kv[1][1])[0]
+        _STORE.pop(oldest, None)
+    token = uuid.uuid4().hex
+    _STORE[token] = (data, time.time())
+    return token
+
+def _store_get(token: str) -> Optional[bytes]:
+    item = _STORE.get(token)
+    if not item:
+        return None
+    data, ts = item
+    if (time.time() - ts) > _STORE_TTL:
+        _STORE.pop(token, None)
+        return None
+    return data
 
 # ---------------- Helpers ----------------
 def _to_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
@@ -117,14 +142,12 @@ def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.
         return mesh
 
 def _export_stl_bytes(mesh: trimesh.Trimesh) -> bytes:
-    if hasattr(mesh, "export"):
-        try:
-            return mesh.export(file_type="stl")
-        except Exception:
-            pass
-    f = io.BytesIO()
-    mesh.export(f, file_type="stl")
-    return f.getvalue()
+    try:
+        return mesh.export(file_type="stl")
+    except Exception:
+        f = io.BytesIO()
+        mesh.export(f, file_type="stl")
+        return f.getvalue()
 
 def _ensure_not_empty(mesh: Optional[trimesh.Trimesh]) -> trimesh.Trimesh:
     """
@@ -133,7 +156,6 @@ def _ensure_not_empty(mesh: Optional[trimesh.Trimesh]) -> trimesh.Trimesh:
     """
     if isinstance(mesh, trimesh.Trimesh) and mesh.vertices.size >= 3:
         return mesh
-    # cubito centrado
     fallback = box(extents=(10.0, 10.0, 3.0))
     fallback.apply_translation((0, 0, 1.5))
     return fallback
@@ -146,7 +168,7 @@ class GenerateParams(BaseModel):
     thickness_mm: Optional[float] = None
     fillet_mm: Optional[float] = 0.0
     holes: List[Dict[str, float]] = Field(default_factory=list)
-    textOps: List[Dict[str, float]] = Field(default_factory=list)   # placeholder
+    textOps: List[Dict[str, float]] = Field(default_factory=list)   # reservado
     arrayOps: List[Dict[str, float]] = Field(default_factory=list)
 
 class GeneratePayload(BaseModel):
@@ -158,8 +180,22 @@ class GeneratePayload(BaseModel):
 async def health():
     return {"status": "ok"}
 
+@app.get("/stl/{token}")
+async def get_stl(token: str):
+    """
+    Descarga temporal del STL generado.
+    """
+    data = _store_get(token)
+    if not data:
+        return JSONResponse({"ok": False, "error": "stl not found or expired"}, status_code=404)
+    # Devolvemos como 'model/stl' (muchos cargadores lo aceptan) o 'application/sla'
+    return StreamingResponse(io.BytesIO(data), media_type="model/stl", headers={
+        "Content-Disposition": f'inline; filename="model-{token}.stl"',
+        "Cache-Control": "no-store",
+    })
+
 @app.post("/generate")
-async def generate(payload: GeneratePayload):
+async def generate(payload: GeneratePayload, request: Request):
     try:
         slug = (payload.model or "").replace("-", "_").strip()
         if slug not in REGISTRY:
@@ -184,31 +220,41 @@ async def generate(payload: GeneratePayload):
 
         mesh = _ensure_not_empty(_to_mesh(built))
 
-        # Necesario para agujeros: grosor
+        # Grosor para altura de los cilindros (agujeros)
         thickness = float(params.get("thickness_mm") or 3.0)
 
         # 2) Post-procesado
         mesh = _apply_holes(mesh, params.get("holes", []), thickness)
         mesh = _apply_array(mesh, params.get("arrayOps", []))
         mesh = _apply_rounding_if_possible(mesh, float(params.get("fillet_mm") or 0.0))
-        # textOps: reservado (sin cambios)
 
-        # 3) Exportar STL (bytes) + data URL inline SIEMPRE
+        # 3) Exportar STL
         stl_bytes = _export_stl_bytes(mesh)
         stl_b64 = base64.b64encode(stl_bytes).decode("ascii")
         stl_data_url = f"data:model/stl;base64,{stl_b64}"
 
-        # 4) Subir (no bloqueante para pintar en el visor)
-        url: Optional[str] = None
+        # 4) Publicar URL temporal del backend
+        token = _store_put(stl_bytes)
+        base_url = os.getenv("PUBLIC_BASE_URL") or str(request.base_url).rstrip("/")
+        backend_url = f"{base_url}/stl/{token}"
+
+        # 5) Subir a Supabase (opcional, no bloqueante para el visor)
+        storage_url: Optional[str] = None
         try:
             filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
             up = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # acepta bytes o file-like
-            url = (up or {}).get("url")
-        except Exception as e:
-            # No rompemos la respuesta: el visor podrá usar stlData
-            url = None
+            storage_url = (up or {}).get("url")
+        except Exception:
+            storage_url = None  # no rompemos la respuesta
 
-        return {"ok": True, "slug": slug, "url": url, "stlData": stl_data_url}
+        # Devolvemos SIEMPRE una url válida (del propio backend) y además stlData
+        return {
+            "ok": True,
+            "slug": slug,
+            "url": backend_url,         # segura para el visor
+            "stlData": stl_data_url,    # por si queréis cargar inline
+            "storageUrl": storage_url,  # subida a Supabase, si ha ido bien
+        }
 
     except Exception as e:
         return {"ok": False, "error": f"unexpected: {type(e).__name__}: {e}"}
