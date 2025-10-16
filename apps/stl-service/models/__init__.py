@@ -1,112 +1,117 @@
 # apps/stl-service/models/__init__.py
-from typing import Dict, Any
+from typing import Dict, Any, Callable, List
 import trimesh
 from trimesh.creation import box
 
 
-def mm(v, default):
-    try:
-        x = float(v)
-        return x if x > 0 else default
-    except Exception:
-        return default
+def _plate(params: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(params.get("length_mm", 120.0))
+    W = float(params.get("width_mm", 100.0))
+    T = float(params.get("thickness_mm", 3.0))
+    # placa plana apoyada en Z=0
+    m = box((L, W, T))
+    m.apply_translation((L * 0.5, W * 0.5, T * 0.5))
+    return m
 
 
-def make_plate(p: Dict[str, Any]) -> trimesh.Trimesh:
-    """
-    Placa rectangular básica: length x width x thickness, apoyada sobre Z=0.
-    El resto (agujeros, arrays, redondeos) se aplica después en app.py.
-    """
-    L = mm(p.get("length_mm") or p.get("length"), 120.0)
-    W = mm(p.get("width_mm") or p.get("width"), 100.0)
-    T = mm(p.get("thickness_mm") or p.get("wall") or p.get("thickness") or 3.0, 3.0)
-    mesh = box(extents=(L, W, T))
-    # Coloca la placa con la base en Z=0 (más cómodo para el visor)
-    mesh.apply_translation((L * 0.5, W * 0.5, T * 0.5))
-    return mesh
+def _block(params: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(params.get("length_mm", 80.0))
+    W = float(params.get("width_mm", 40.0))
+    H = float(params.get("height_mm", 30.0))
+    m = box((L, W, H))
+    m.apply_translation((L * 0.5, W * 0.5, H * 0.5))
+    return m
 
 
-# Si tienes generadores específicos (ej. cable_tray con paredes),
-# puedes sustituir make_plate por tus funciones reales más adelante.
+# Ejemplo de uno “real”: si tienes un módulo especifico, impórtalo y úsalo aquí
+def _vesa_adapter(params: Dict[str, Any]) -> trimesh.Trimesh:
+    # Hasta que metas tu implementación detallada, usa placa base
+    return _plate(params)
+
+
+# REGISTRY
+# - key: slug que llega desde el frontend (ForgeForm MODEL_OPTIONS)
+# - aliases: otros nombres que quieras aceptar (compatibilidad)
+# - defaults: valores por defecto para ese modelo
 REGISTRY: Dict[str, Dict[str, Any]] = {
-    # 1
     "cable_tray": {
-        "defaults": {"length_mm": 120, "width_mm": 100, "thickness_mm": 3},
-        "make": make_plate,
+        "make": _plate,
+        "defaults": {"thickness_mm": 3.0},
+        "aliases": [],
     },
-    # 2
     "vesa_adapter": {
-        "defaults": {"length_mm": 120, "width_mm": 120, "thickness_mm": 3},
-        "make": make_plate,
+        "make": _vesa_adapter,
+        "defaults": {"length_mm": 120.0, "width_mm": 120.0, "thickness_mm": 3.0},
+        "aliases": ["vesa", "vesa_plate"],
     },
-    # 3
     "router_mount": {
-        "defaults": {"length_mm": 120, "width_mm": 80, "thickness_mm": 4},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 120.0, "width_mm": 60.0, "height_mm": 60.0},
+        "aliases": ["router_mount_l"],
     },
-    # 4
     "cable_clip": {
-        "defaults": {"length_mm": 40, "width_mm": 20, "thickness_mm": 3},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 30.0, "width_mm": 15.0, "height_mm": 15.0},
+        "aliases": [],
     },
-    # 5
     "headset_stand": {
-        "defaults": {"length_mm": 150, "width_mm": 60, "thickness_mm": 5},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 100.0, "width_mm": 50.0, "height_mm": 180.0},
+        "aliases": [],
     },
-    # 6
     "phone_dock": {
-        "defaults": {"length_mm": 100, "width_mm": 60, "thickness_mm": 8},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 90.0, "width_mm": 70.0, "height_mm": 30.0},
+        "aliases": ["phone_dock_usbc", "phone_dock_usb_c"],
     },
-    # 7
     "tablet_stand": {
-        "defaults": {"length_mm": 150, "width_mm": 100, "thickness_mm": 6},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 150.0, "width_mm": 120.0, "height_mm": 40.0},
+        "aliases": [],
     },
-    # 8
     "ssd_holder": {
-        "defaults": {"length_mm": 100, "width_mm": 70, "thickness_mm": 3},
-        "make": make_plate,
+        "make": _plate,
+        "defaults": {"length_mm": 100.0, "width_mm": 70.0, "thickness_mm": 4.0},
+        "aliases": ["ssd_2_5"],
     },
-    # 9
     "raspi_case": {
-        "defaults": {"length_mm": 95, "width_mm": 65, "thickness_mm": 3},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 95.0, "width_mm": 65.0, "height_mm": 30.0},
+        "aliases": ["raspberry_pi_case", "raspberry_case"],
     },
-    # 10
     "go_pro_mount": {
-        "defaults": {"length_mm": 60, "width_mm": 40, "thickness_mm": 5},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 45.0, "width_mm": 30.0, "height_mm": 30.0},
+        "aliases": ["gopro_mount"],
     },
-    # 11
     "wall_hook": {
-        "defaults": {"length_mm": 80, "width_mm": 40, "thickness_mm": 6},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 60.0, "width_mm": 20.0, "height_mm": 40.0},
+        "aliases": [],
     },
-    # 12
     "monitor_stand": {
-        "defaults": {"length_mm": 200, "width_mm": 120, "thickness_mm": 8},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 300.0, "width_mm": 200.0, "height_mm": 40.0},
+        "aliases": [],
     },
-    # 13
     "laptop_stand": {
-        "defaults": {"length_mm": 220, "width_mm": 120, "thickness_mm": 8},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 270.0, "width_mm": 220.0, "height_mm": 40.0},
+        "aliases": [],
     },
-    # 14
     "mic_arm_clip": {
-        "defaults": {"length_mm": 60, "width_mm": 40, "thickness_mm": 5},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 40.0, "width_mm": 20.0, "height_mm": 25.0},
+        "aliases": ["mic_clip"],
     },
-    # 15
     "camera_plate": {
-        "defaults": {"length_mm": 120, "width_mm": 100, "thickness_mm": 4},
-        "make": make_plate,
+        "make": _plate,
+        "defaults": {"length_mm": 80.0, "width_mm": 50.0, "thickness_mm": 5.0},
+        "aliases": ["camera_plate_1_4"],
     },
-    # 16
     "hub_holder": {
-        "defaults": {"length_mm": 120, "width_mm": 60, "thickness_mm": 4},
-        "make": make_plate,
+        "make": _block,
+        "defaults": {"length_mm": 120.0, "width_mm": 40.0, "height_mm": 25.0},
+        "aliases": ["usb_hub_holder"],
     },
 }
