@@ -1,86 +1,107 @@
 # apps/stl-service/supabase_client.py
+import io
 import os
 import time
-from typing import Optional, Union
+from typing import Optional, Union, BinaryIO, Dict, Any
 
-try:
-    from supabase import create_client, Client
-except Exception:
-    create_client = None
-    Client = None  # type: ignore[assignment]
+from supabase import create_client, Client
+
+
+_CLIENT: Optional[Client] = None
 
 
 def _env(name: str, fallback: Optional[str] = None) -> Optional[str]:
     v = os.getenv(name)
-    if v is None or f"{v}".strip() == "":
+    if v is None:
         return fallback
-    return f"{v}".strip()
+    v = v.strip()
+    return v or fallback
 
 
-def _ensure_trailing_slash(url: str) -> str:
-    return url if url.endswith("/") else url + "/"
-
-
-def get_client() -> "Client":
+def get_client() -> Client:
     """
-    Crea el cliente de Supabase usando credenciales de servidor.
-    Prioriza variables privadas si existen; si no, usa las públicas.
+    Crea (singleton) el cliente oficial de Supabase con URL y KEY válidos.
+    Acepta tanto SUPABASE_SERVICE_KEY como SUPABASE_SERVICE_ROLE_KEY.
     """
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
+
     url = _env("SUPABASE_URL") or _env("NEXT_PUBLIC_SUPABASE_URL")
-    key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY") or _env("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    key = (
+        _env("SUPABASE_SERVICE_KEY")
+        or _env("SUPABASE_SERVICE_ROLE_KEY")
+        or _env("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    )
 
     if not url or not key:
         raise RuntimeError("SUPABASE_URL o SUPABASE_*_KEY no configurados")
 
-    url = _ensure_trailing_slash(url)
+    _CLIENT = create_client(url, key)
+    return _CLIENT
 
-    if create_client is None:
-        raise RuntimeError("Paquete 'supabase' no disponible en el runtime")
 
-    return create_client(url, key)
+def _get_bucket_name() -> str:
+    return (
+        _env("SUPABASE_BUCKET")
+        or _env("NEXT_PUBLIC_SUPABASE_BUCKET")
+        or "forge-stl"
+    )
 
 
 def upload_and_get_url(
-    fileobj_or_bytes: Union[bytes, "io.BytesIO", "memoryview", any],
+    fileobj: Union[bytes, BinaryIO],
     *,
-    filename: str,
-    folder: str = "stl",
-    bucket: Optional[str] = None,
-    sign_seconds: int = 7 * 24 * 3600,
-) -> dict:
+    folder: Optional[str] = None,
+    filename: Optional[str] = None,
+    mime: str = "model/stl",
+    public: bool = True,
+) -> Dict[str, Any]:
     """
-    Sube bytes o file-like a Supabase Storage y devuelve una URL firmada.
-    - Acepta directamente `bytes` o cualquier objeto con `.read()`.
-    - Usa `bucket` de env si no se pasa (NEXT_PUBLIC_SUPABASE_BUCKET o SUPABASE_BUCKET).
+    Sube al bucket y devuelve { url, path }.
+    Acepta bytes o file-like. Si el bucket no es público, devuelve signed URL.
     """
-    # --- datos ---
-    if isinstance(fileobj_or_bytes, (bytes, memoryview)):
-        data = bytes(fileobj_or_bytes)
-    elif hasattr(fileobj_or_bytes, "read"):
-        data = fileobj_or_bytes.read()  # type: ignore[attr-defined]
-    else:
-        raise TypeError("upload_and_get_url: se esperaban bytes o un objeto con .read()")
-
-    if not data:
-        raise ValueError("upload_and_get_url: no hay datos para subir")
-
-    bucket = bucket or _env("SUPABASE_BUCKET") or _env("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl"
     client = get_client()
-    storage = client.storage.from_(bucket)
+    bucket = _get_bucket_name()
 
-    # ruta única por carpeta
-    # (evita colisiones cuando se repite el nombre)
-    epoch = int(time.time())
-    path = f"{folder.strip('/')}/{epoch}-{filename}".replace("//", "/")
+    # Normaliza path
+    folder = (folder or "").strip().strip("/")
+    name = (filename or f"file-{int(time.time())}.stl").strip().replace("/", "_")
+    path = f"{folder}/{name}" if folder else name
 
-    # sube con upsert para no fallar por nombres repetidos
-    storage.upload(path, data, {"contentType": "application/sla", "upsert": "true"})
+    # Normaliza a bytes
+    if isinstance(fileobj, (bytes, bytearray)):
+        data = bytes(fileobj)
+    else:
+        # file-like
+        data = fileobj.read()
 
-    # URL firmada (fallback: pública)
+    # Subida (si existe, sobreescribe)
+    client.storage.from_(bucket).upload(
+        path=path,
+        file=data,
+        file_options={"content-type": mime, "upsert": True},
+    )
+
+    # URL pública (si el bucket es público)…
     try:
-        signed = storage.create_signed_url(path, sign_seconds)
-        url = signed.get("signedURL") or signed.get("signed_url") or signed.get("signedUrl")
+        public_url = client.storage.from_(bucket).get_public_url(path)  # type: ignore
+        if public_url and isinstance(public_url, str):
+            return {"url": public_url, "path": path}
+        if isinstance(public_url, dict) and public_url.get("publicUrl"):
+            return {"url": public_url["publicUrl"], "path": path}
     except Exception:
-        url = storage.get_public_url(path)
+        pass
 
-    return {"path": path, "url": url}
+    # …o firmada como fallback
+    try:
+        signed = client.storage.from_(bucket).create_signed_url(path, 60 * 60)  # 1 h
+        if isinstance(signed, dict):
+            url = signed.get("signedURL") or signed.get("signed_url") or signed.get("url")
+            if url:
+                return {"url": url, "path": path}
+    except Exception:
+        pass
+
+    # Último recurso: devolver el path
+    return {"url": None, "path": path}
