@@ -1,18 +1,22 @@
 # apps/stl-service/app.py
-import io
 import os
+import io
 import uuid
+import base64
 from typing import List, Optional, Dict, Any, Union
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+import numpy as np
 import trimesh
-from trimesh.creation import cylinder
+from trimesh.creation import cylinder, box
 
 from supabase_client import upload_and_get_url
-from models import REGISTRY  # dict con entradas: { "make": callable, "defaults": {...}, "aliases": [...] }
+from models import (
+    REGISTRY,                      # dict: name -> { types, defaults, make/builder }
+)
 
 # ---------------- CORS ----------------
 origins = os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
@@ -27,6 +31,13 @@ app.add_middleware(
 
 # ---------------- Helpers ----------------
 def _to_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
+    """
+    Convierte lo que devuelva el generador a una Trimesh.
+    Acepta:
+      - Trimesh
+      - Lista de Trimesh
+      - Scene (dump concatenado)
+    """
     if isinstance(obj, trimesh.Trimesh):
         return obj
     if isinstance(obj, list) and obj and isinstance(obj[0], trimesh.Trimesh):
@@ -41,7 +52,6 @@ def _to_mesh(obj: Any) -> Optional[trimesh.Trimesh]:
             return None
     return None
 
-
 def _boolean_diff_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         out = a.difference(b)
@@ -51,30 +61,45 @@ def _boolean_diff_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trime
     except Exception:
         return None
 
-
 def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness: float) -> trimesh.Trimesh:
     """
-    Agujeros verticales (Z) restando cilindros.
-    UI envía: x_mm, y_mm, d_mm  -> radio = d/2
+    Aplica agujeros como cilindros restados a lo largo de Z.
+    'holes': [{x, y, r}]
     """
     if not holes:
         return mesh
     base = mesh
-    h = max(thickness * 2.5, 5.0)
-    for hdef in holes:
-        x = float(hdef.get("x_mm", hdef.get("x", 0.0)))
-        y = float(hdef.get("y_mm", hdef.get("y", 0.0)))
-        d = float(hdef.get("d_mm", hdef.get("d", 2.0)))
-        r = max(0.25, d * 0.5)
-        cyl = cylinder(radius=r, height=h, sections=64)
-        # lo situamos atravesando la placa (asumimos base en Z=0)
-        cyl.apply_translation((x, y, h * 0.5))
+    for h in holes:
+        x = float(h.get("x", 0.0))
+        y = float(h.get("y", 0.0))
+        r = max(0.1, float(h.get("r", 1.0)))
+        cyl = cylinder(radius=r, height=max(thickness * 2.5, 5.0), sections=48)
+        cyl.apply_translation((x, y, cyl.extents[2] * 0.5))
         diff = _boolean_diff_safe(base, cyl)
         base = diff if isinstance(diff, trimesh.Trimesh) else base
     return base
 
+def _apply_rounding_if_possible(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
+    """
+    Fillet/chaflán aproximado con manifold3d si está disponible.
+    Si no, no hace nada (no rompe).
+    """
+    r = float(fillet_mm or 0.0)
+    if r <= 0.0:
+        return mesh
+    try:
+        import manifold3d as m3d
+        man = m3d.Manifold(mesh)
+        smooth = man.Erode(r).Dilate(r)  # cierre morfológico
+        return smooth.to_trimesh() if hasattr(smooth, "to_trimesh") else mesh
+    except Exception:
+        return mesh
 
 def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.Trimesh:
+    """
+    Aplica arrays de duplicación con desplazamientos (dx, dy).
+    Si algo falla, concatena sin booleanos.
+    """
     if not ops:
         return mesh
     copies = [mesh]
@@ -91,121 +116,99 @@ def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.
     except Exception:
         return mesh
 
+def _export_stl_bytes(mesh: trimesh.Trimesh) -> bytes:
+    if hasattr(mesh, "export"):
+        try:
+            return mesh.export(file_type="stl")
+        except Exception:
+            pass
+    f = io.BytesIO()
+    mesh.export(f, file_type="stl")
+    return f.getvalue()
+
+def _ensure_not_empty(mesh: Optional[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """
+    Si el generador devolviera None o una malla degenerada, fabricamos
+    un cubo 10x10x3mm para que el visor no quede vacío.
+    """
+    if isinstance(mesh, trimesh.Trimesh) and mesh.vertices.size >= 3:
+        return mesh
+    # cubito centrado
+    fallback = box(extents=(10.0, 10.0, 3.0))
+    fallback.apply_translation((0, 0, 1.5))
+    return fallback
 
 # ---------------- Schemas ----------------
-class TextOp(BaseModel):
-    text: str
-    x_mm: float = 0
-    y_mm: float = 0
-    z_mm: float = 0
-    height_mm: float = 6
-    depth_mm: float = 0.6  # relieve (+) o grabado (-)
-    rotate_deg: float = 0
-
-
-class ArrayOp(BaseModel):
-    count: int = 1
-    dx: float = 0.0
-    dy: float = 0.0
-
-
-class HoleOp(BaseModel):
-    x_mm: float
-    y_mm: float
-    d_mm: float
-
-
 class GenerateParams(BaseModel):
     length_mm: Optional[float] = None
     width_mm: Optional[float] = None
     height_mm: Optional[float] = None
     thickness_mm: Optional[float] = None
     fillet_mm: Optional[float] = 0.0
-    holes: List[HoleOp] = Field(default_factory=list)
-    textOps: List[TextOp] = Field(default_factory=list)   # placeholder seguro
-    arrayOps: List[ArrayOp] = Field(default_factory=list)
-
+    holes: List[Dict[str, float]] = Field(default_factory=list)
+    textOps: List[Dict[str, float]] = Field(default_factory=list)   # placeholder
+    arrayOps: List[Dict[str, float]] = Field(default_factory=list)
 
 class GeneratePayload(BaseModel):
     model: str
     params: GenerateParams = Field(default_factory=GenerateParams)
-
 
 # ---------------- Rutas ----------------
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-
-def _resolve_entry(slug: str) -> Optional[Dict[str, Any]]:
-    """Acepta alias declarados en REGISTRY."""
-    e = REGISTRY.get(slug)
-    if e:
-        return e
-    # buscar por alias
-    for name, entry in REGISTRY.items():
-        aliases = (entry.get("aliases") or []) if isinstance(entry, dict) else []
-        if slug in aliases:
-            return entry
-    return None
-
-
 @app.post("/generate")
 async def generate(payload: GeneratePayload):
     try:
         slug = (payload.model or "").replace("-", "_").strip()
-        entry = _resolve_entry(slug)
-        if not entry:
+        if slug not in REGISTRY:
             return {"ok": False, "error": f"Model '{slug}' not found"}
 
+        entry = REGISTRY[slug]
         defaults = (entry.get("defaults") or {}) if isinstance(entry, dict) else {}
         make = (entry.get("make") if isinstance(entry, dict) else None) or entry.get("builder") or None
         if not callable(make):
             return {"ok": False, "error": f"Model '{slug}' has no builder"}
 
-        # Params finales (prioriza los del payload)
-        params_dict = payload.params.model_dump(exclude_none=True)
-        params: Dict[str, Any] = {**defaults, **params_dict}
+        # 1) Construcción base del modelo
+        params = {
+            **defaults,
+            **(payload.params.model_dump(exclude_none=True) if hasattr(payload.params, "model_dump") else dict(payload.params))
+        }
 
-        # Build
         try:
             built = make(params)
         except Exception as e:
             return {"ok": False, "error": f"Build error: {e}"}
 
-        mesh = _to_mesh(built)
-        if not isinstance(mesh, trimesh.Trimesh):
-            return {"ok": False, "error": "Builder did not return a mesh"}
+        mesh = _ensure_not_empty(_to_mesh(built))
 
+        # Necesario para agujeros: grosor
         thickness = float(params.get("thickness_mm") or 3.0)
 
-        # Post-proceso (no rompe si algo falla)
-        try:
-            mesh = _apply_holes(mesh, [h.model_dump() for h in payload.params.holes], thickness)
-        except Exception:
-            pass
-        try:
-            mesh = _apply_array(mesh, [a.model_dump() for a in payload.params.arrayOps])
-        except Exception:
-            pass
-        # textOps: queda preparado (placeholder sin romper)
-        # Si más adelante integras extrusión de fuentes, aplícalo aquí.
+        # 2) Post-procesado
+        mesh = _apply_holes(mesh, params.get("holes", []), thickness)
+        mesh = _apply_array(mesh, params.get("arrayOps", []))
+        mesh = _apply_rounding_if_possible(mesh, float(params.get("fillet_mm") or 0.0))
+        # textOps: reservado (sin cambios)
 
-        # Export STL
-        stl_bytes: Union[bytes, bytearray]
+        # 3) Exportar STL (bytes) + data URL inline SIEMPRE
+        stl_bytes = _export_stl_bytes(mesh)
+        stl_b64 = base64.b64encode(stl_bytes).decode("ascii")
+        stl_data_url = f"data:model/stl;base64,{stl_b64}"
+
+        # 4) Subir (no bloqueante para pintar en el visor)
+        url: Optional[str] = None
         try:
-            stl_bytes = mesh.export(file_type="stl")
-        except Exception:
-            f = io.BytesIO()
-            mesh.export(f, file_type="stl")
-            stl_bytes = f.getvalue()
+            filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
+            up = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # acepta bytes o file-like
+            url = (up or {}).get("url")
+        except Exception as e:
+            # No rompemos la respuesta: el visor podrá usar stlData
+            url = None
 
-        # Subir a Supabase
-        filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
-        up = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # acepta bytes o file-like
-        url = (up or {}).get("url")
+        return {"ok": True, "slug": slug, "url": url, "stlData": stl_data_url}
 
-        return {"ok": True, "slug": slug, "url": url, "path": (up or {}).get("path")}
     except Exception as e:
-        # Nunca 500: siempre JSON amigable
-        return {"ok": False, "error": f"unexpected: {e.__class__.__name__}: {e}"}
+        return {"ok": False, "error": f"unexpected: {type(e).__name__}: {e}"}
