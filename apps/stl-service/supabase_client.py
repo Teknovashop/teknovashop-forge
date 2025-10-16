@@ -1,112 +1,78 @@
 # apps/stl-service/supabase_client.py
-import io
 import os
-import time
-from typing import Optional, Union, BinaryIO, Dict, Any
+import io
+from typing import Optional, Union, Dict, Any
 
 from supabase import create_client, Client
 
+_SUPABASE: Optional[Client] = None
 
-_CLIENT: Optional[Client] = None
-
-
-def _env(name: str, fallback: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(name)
-    if v is None:
-        return fallback
-    v = v.strip()
-    return v or fallback
-
+def _norm_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return url
+    # la SDK insiste en el slash final para la parte de Storage
+    return url if url.endswith("/") else url + "/"
 
 def get_client() -> Client:
-    """
-    Crea (singleton) el cliente oficial de Supabase con URL y KEY válidos.
-    Acepta tanto SUPABASE_SERVICE_KEY como SUPABASE_SERVICE_ROLE_KEY.
-    """
-    global _CLIENT
-    if _CLIENT is not None:
-        return _CLIENT
+    global _SUPABASE
+    if _SUPABASE is not None:
+        return _SUPABASE
 
-    url = _env("SUPABASE_URL") or _env("NEXT_PUBLIC_SUPABASE_URL")
-    key = (
-        _env("SUPABASE_SERVICE_KEY")
-        or _env("SUPABASE_SERVICE_ROLE_KEY")
-        or _env("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-    )
-
+    url = _norm_url(os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "")
+    # Preferimos SERVICE_ROLE para poder subir sin fricciones desde backend
+    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") or ""
     if not url or not key:
         raise RuntimeError("SUPABASE_URL o SUPABASE_*_KEY no configurados")
 
-    _CLIENT = create_client(url, key)
-    return _CLIENT
+    _SUPABASE = create_client(url, key)
+    return _SUPABASE
 
-
-def _get_bucket_name() -> str:
-    return (
-        _env("SUPABASE_BUCKET")
-        or _env("NEXT_PUBLIC_SUPABASE_BUCKET")
-        or "forge-stl"
-    )
-
-
-def upload_and_get_url(
-    fileobj: Union[bytes, BinaryIO],
-    *,
-    folder: Optional[str] = None,
-    filename: Optional[str] = None,
-    mime: str = "model/stl",
-    public: bool = True,
-) -> Dict[str, Any]:
+def upload_and_get_url(fileobj: Union[bytes, io.BytesIO, io.BufferedIOBase],
+                       folder: str,
+                       filename: str,
+                       bucket: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Sube al bucket y devuelve { url, path }.
-    Acepta bytes o file-like. Si el bucket no es público, devuelve signed URL.
+    Sube a Supabase Storage y retorna {'url', 'path'}.
+    - Acepta bytes o file-like.
+    - Usa bucket de entorno: SUPABASE_BUCKET o NEXT_PUBLIC_SUPABASE_BUCKET
     """
-    client = get_client()
-    bucket = _get_bucket_name()
+    try:
+        client = get_client()
+    except Exception:
+        return None
 
-    # Normaliza path
-    folder = (folder or "").strip().strip("/")
-    name = (filename or f"file-{int(time.time())}.stl").strip().replace("/", "_")
-    path = f"{folder}/{name}" if folder else name
+    bucket_name = bucket or os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl"
+    path = f"{folder.strip().strip('/')}/{filename}".replace("//", "/")
 
-    # Normaliza a bytes
+    # Aseguramos file-like
     if isinstance(fileobj, (bytes, bytearray)):
-        data = bytes(fileobj)
+        bio = io.BytesIO(fileobj)
     else:
-        # file-like
-        data = fileobj.read()
+        bio = fileobj  # ya es file-like
 
-    # Subida (si existe, sobreescribe)
-    # OJO: la librería espera headers como cadenas; el upsert correcto es "x-upsert": "true"
-    client.storage.from_(bucket).upload(
-        path=path,
-        file=data,
-        file_options={
-            "content-type": mime,
-            "x-upsert": "true",         # <-- clave del bug (antes: upsert: True)
-            # "cache-control": "3600",  # opcional
-        },
-    )
-
-    # URL pública (si el bucket es público)…
+    # La SDK maneja 'upsert' como parámetro, no como cabecera
     try:
-        public_url = client.storage.from_(bucket).get_public_url(path)  # type: ignore
-        if public_url and isinstance(public_url, str):
-            return {"url": public_url, "path": path}
-        if isinstance(public_url, dict) and public_url.get("publicUrl"):
-            return {"url": public_url["publicUrl"], "path": path}
+        client.storage.from_(bucket_name).upload(
+            path=path,
+            file=bio,
+            file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000", "upsert": True},
+        )
     except Exception:
-        pass
+        # si ya existe o algo falla, intentamos upsert explícito
+        try:
+            client.storage.from_(bucket_name).update(
+                path=path,
+                file=bio,
+                file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000"},
+            )
+        except Exception:
+            return None
 
-    # …o firmada como fallback
+    # URL pública
     try:
-        signed = client.storage.from_(bucket).create_signed_url(path, 60 * 60)  # 1 h
-        if isinstance(signed, dict):
-            url = signed.get("signedURL") or signed.get("signed_url") or signed.get("url")
-            if url:
-                return {"url": url, "path": path}
+        public_url = client.storage.from_(bucket_name).get_public_url(path)
     except Exception:
-        pass
+        public_url = None
 
-    # Último recurso: devolver el path
-    return {"url": None, "path": path}
+    return {"url": public_url, "path": path}
