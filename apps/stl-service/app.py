@@ -1,21 +1,18 @@
 # apps/stl-service/app.py
-import os
 import io
+import os
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-import numpy as np
 import trimesh
 from trimesh.creation import cylinder
 
 from supabase_client import upload_and_get_url
-from models import (
-    REGISTRY,
-)
+from models import REGISTRY  # dict con entradas: { "make": callable, "defaults": {...}, "aliases": [...] }
 
 # ---------------- CORS ----------------
 origins = os.getenv("CORS_ALLOW_ORIGINS", "*").split(",")
@@ -56,33 +53,25 @@ def _boolean_diff_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trime
 
 
 def _apply_holes(mesh: trimesh.Trimesh, holes: List[Dict[str, float]], thickness: float) -> trimesh.Trimesh:
+    """
+    Agujeros verticales (Z) restando cilindros.
+    UI envía: x_mm, y_mm, d_mm  -> radio = d/2
+    """
     if not holes:
         return mesh
     base = mesh
-    for h in holes:
-        x = float(h.get("x", h.get("x_mm", 0.0)))
-        y = float(h.get("y", h.get("y_mm", 0.0)))
-        r = float(h.get("r", h.get("d_mm", 2.0))) * 0.5 if "d_mm" in h and "r" not in h else float(h.get("r", 2.0))
-        r = max(0.1, r)
-        height = max(thickness * 3.0, 6.0)
-        cyl = cylinder(radius=r, height=height, sections=48)
-        cyl.apply_translation((x, y, height * 0.5))
+    h = max(thickness * 2.5, 5.0)
+    for hdef in holes:
+        x = float(hdef.get("x_mm", hdef.get("x", 0.0)))
+        y = float(hdef.get("y_mm", hdef.get("y", 0.0)))
+        d = float(hdef.get("d_mm", hdef.get("d", 2.0)))
+        r = max(0.25, d * 0.5)
+        cyl = cylinder(radius=r, height=h, sections=64)
+        # lo situamos atravesando la placa (asumimos base en Z=0)
+        cyl.apply_translation((x, y, h * 0.5))
         diff = _boolean_diff_safe(base, cyl)
         base = diff if isinstance(diff, trimesh.Trimesh) else base
     return base
-
-
-def _apply_rounding_if_possible(mesh: trimesh.Trimesh, fillet_mm: float) -> trimesh.Trimesh:
-    r = float(fillet_mm or 0.0)
-    if r <= 0.0:
-        return mesh
-    try:
-        import manifold3d as m3d  # opcional
-        man = m3d.Manifold(mesh)
-        smooth = man.Erode(r).Dilate(r)
-        return smooth.to_trimesh() if hasattr(smooth, "to_trimesh") else mesh
-    except Exception:
-        return mesh
 
 
 def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.Trimesh:
@@ -104,15 +93,37 @@ def _apply_array(mesh: trimesh.Trimesh, ops: List[Dict[str, float]]) -> trimesh.
 
 
 # ---------------- Schemas ----------------
+class TextOp(BaseModel):
+    text: str
+    x_mm: float = 0
+    y_mm: float = 0
+    z_mm: float = 0
+    height_mm: float = 6
+    depth_mm: float = 0.6  # relieve (+) o grabado (-)
+    rotate_deg: float = 0
+
+
+class ArrayOp(BaseModel):
+    count: int = 1
+    dx: float = 0.0
+    dy: float = 0.0
+
+
+class HoleOp(BaseModel):
+    x_mm: float
+    y_mm: float
+    d_mm: float
+
+
 class GenerateParams(BaseModel):
     length_mm: Optional[float] = None
     width_mm: Optional[float] = None
     height_mm: Optional[float] = None
     thickness_mm: Optional[float] = None
     fillet_mm: Optional[float] = 0.0
-    holes: List[Dict[str, float]] = Field(default_factory=list)
-    textOps: List[Dict[str, float]] = Field(default_factory=list)
-    arrayOps: List[Dict[str, float]] = Field(default_factory=list)
+    holes: List[HoleOp] = Field(default_factory=list)
+    textOps: List[TextOp] = Field(default_factory=list)   # placeholder seguro
+    arrayOps: List[ArrayOp] = Field(default_factory=list)
 
 
 class GeneratePayload(BaseModel):
@@ -126,50 +137,75 @@ async def health():
     return {"status": "ok"}
 
 
+def _resolve_entry(slug: str) -> Optional[Dict[str, Any]]:
+    """Acepta alias declarados en REGISTRY."""
+    e = REGISTRY.get(slug)
+    if e:
+        return e
+    # buscar por alias
+    for name, entry in REGISTRY.items():
+        aliases = (entry.get("aliases") or []) if isinstance(entry, dict) else []
+        if slug in aliases:
+            return entry
+    return None
+
+
 @app.post("/generate")
 async def generate(payload: GeneratePayload):
-    slug = (payload.model or "").replace("-", "_").strip()
-    if slug not in REGISTRY:
-        return {"ok": False, "error": f"Model '{slug}' not found"}
-
-    entry = REGISTRY[slug]
-    defaults = (entry.get("defaults") or {}) if isinstance(entry, dict) else {}
-    make = (entry.get("make") if isinstance(entry, dict) else None) or entry.get("builder") or None
-    if not callable(make):
-        return {"ok": False, "error": f"Model '{slug}' has no builder"}
-
-    params = {
-        **defaults,
-        **(payload.params.model_dump(exclude_none=True) if hasattr(payload.params, "model_dump") else dict(payload.params))
-    }
-
     try:
-        built = make(params)
+        slug = (payload.model or "").replace("-", "_").strip()
+        entry = _resolve_entry(slug)
+        if not entry:
+            return {"ok": False, "error": f"Model '{slug}' not found"}
+
+        defaults = (entry.get("defaults") or {}) if isinstance(entry, dict) else {}
+        make = (entry.get("make") if isinstance(entry, dict) else None) or entry.get("builder") or None
+        if not callable(make):
+            return {"ok": False, "error": f"Model '{slug}' has no builder"}
+
+        # Params finales (prioriza los del payload)
+        params_dict = payload.params.model_dump(exclude_none=True)
+        params: Dict[str, Any] = {**defaults, **params_dict}
+
+        # Build
+        try:
+            built = make(params)
+        except Exception as e:
+            return {"ok": False, "error": f"Build error: {e}"}
+
+        mesh = _to_mesh(built)
+        if not isinstance(mesh, trimesh.Trimesh):
+            return {"ok": False, "error": "Builder did not return a mesh"}
+
+        thickness = float(params.get("thickness_mm") or 3.0)
+
+        # Post-proceso (no rompe si algo falla)
+        try:
+            mesh = _apply_holes(mesh, [h.model_dump() for h in payload.params.holes], thickness)
+        except Exception:
+            pass
+        try:
+            mesh = _apply_array(mesh, [a.model_dump() for a in payload.params.arrayOps])
+        except Exception:
+            pass
+        # textOps: queda preparado (placeholder sin romper)
+        # Si más adelante integras extrusión de fuentes, aplícalo aquí.
+
+        # Export STL
+        stl_bytes: Union[bytes, bytearray]
+        try:
+            stl_bytes = mesh.export(file_type="stl")
+        except Exception:
+            f = io.BytesIO()
+            mesh.export(f, file_type="stl")
+            stl_bytes = f.getvalue()
+
+        # Subir a Supabase
+        filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
+        up = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # acepta bytes o file-like
+        url = (up or {}).get("url")
+
+        return {"ok": True, "slug": slug, "url": url, "path": (up or {}).get("path")}
     except Exception as e:
-        return {"ok": False, "error": f"Build error: {e}"}
-
-    mesh = _to_mesh(built)
-    if not isinstance(mesh, trimesh.Trimesh):
-        return {"ok": False, "error": "Builder did not return a mesh"}
-
-    thickness = float(params.get("thickness_mm") or 3.0)
-    mesh = _apply_holes(mesh, params.get("holes", []), thickness)
-    mesh = _apply_array(mesh, params.get("arrayOps", []))
-    mesh = _apply_rounding_if_possible(mesh, float(params.get("fillet_mm") or 0.0))
-    # textOps pendiente: cuando tengamos fuentes vectoriales/TTF en server
-
-    # Export
-    stl_bytes = mesh.export(file_type="stl") if hasattr(mesh, "export") else b""
-    if not stl_bytes:
-        f = io.BytesIO()
-        mesh.export(f, file_type="stl")
-        stl_bytes = f.getvalue()
-
-    # Upload
-    filename = f"{slug}-{uuid.uuid4().hex[:8]}.stl"
-    up = upload_and_get_url(stl_bytes, folder=slug, filename=filename)  # acepta bytes o file-like
-    url = (up or {}).get("url")
-    if not url:
-        return {"ok": False, "error": "upload-failed"}
-
-    return {"ok": True, "slug": slug, "url": url}
+        # Nunca 500: siempre JSON amigable
+        return {"ok": False, "error": f"unexpected: {e.__class__.__name__}: {e}"}
