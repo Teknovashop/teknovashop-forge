@@ -6,23 +6,16 @@ from supabase import create_client, Client
 
 _SUPABASE: Optional[Client] = None
 
-
 def _norm_url(url: str) -> str:
     url = (url or "").strip()
-    return url if not url or url.endswith("/") else (url + "/")
-
+    return url if url.endswith("/") else (url + "/") if url else url
 
 def get_client() -> Client:
     global _SUPABASE
     if _SUPABASE is not None:
         return _SUPABASE
 
-    # Acepta ambas variantes y normaliza el trailing slash (para cortar el warning)
-    url = _norm_url(
-        os.getenv("SUPABASE_URL")
-        or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-        or ""
-    )
+    url = _norm_url(os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "")
     key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL o SUPABASE_*_KEY no configurados")
@@ -30,9 +23,8 @@ def get_client() -> Client:
     _SUPABASE = create_client(url, key)
     return _SUPABASE
 
-
 def upload_and_get_url(
-    data: Union[bytes, bytearray, io.BytesIO],
+    data: Union[bytes, io.BytesIO],
     *,
     bucket: Optional[str] = None,
     folder: str = "",
@@ -40,47 +32,40 @@ def upload_and_get_url(
 ) -> Dict[str, Any]:
     """
     Sube bytes STL a Supabase Storage y devuelve:
-      {"ok": True/False, "url"/"signed_url": str, "path": str, "error"?: str}
+    {
+      "ok": True/False,
+      "url": "https://... (si público)",
+      "signed_url": "https://... (si privado)",
+      "path": "folder/filename"
+    }
     """
     client = get_client()
-    bucket_name = (
-        bucket
-        or os.getenv("SUPABASE_BUCKET")
-        or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET")
-        or "forge-stl"
-    )
-
+    bucket_name = bucket or os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl"
     if not filename:
         filename = "model.stl"
-    folder = (folder or "").strip("/")
+    folder = folder.strip("/")
 
     path = f"{folder}/{filename}" if folder else filename
 
-    # ---- CLAVE: el SDK espera BYTES, no un BytesIO (evita 'expected str, bytes or os.PathLike...')
+    # Aseguramos bytes (no BytesIO) para compatibilidad con supabase-py que corre en Render
+    raw: bytes
     if isinstance(data, (bytes, bytearray)):
-        payload = bytes(data)
-    elif isinstance(data, io.BytesIO):
-        payload = data.getvalue()
+        raw = bytes(data)
     else:
-        # Por si alguien llama con un stream raro, lo volcamos a bytes
-        bio = io.BytesIO()
-        bio.write(data.read())  # type: ignore[attr-defined]
-        payload = bio.getvalue()
+        bio = data  # BytesIO
+        bio.seek(0)
+        raw = bio.getvalue()
 
     try:
         client.storage.from_(bucket_name).upload(
             path=path,
-            file=payload,  # <-- BYTES
-            file_options={
-                "content-type": "model/stl",
-                "cache-control": "public, max-age=31536000",
-                # "upsert": False  # descomenta si quieres evitar overwrite
-            },
+            file=raw,  # <- bytes, no BytesIO
+            file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000"},
         )
     except Exception as e:
         return {"ok": False, "error": f"upload-failed: {e}", "path": path}
 
-    # Intento 1: URL pública (si el bucket es público)
+    # Pública
     try:
         public_url = client.storage.from_(bucket_name).get_public_url(path)
         if public_url:
@@ -88,7 +73,7 @@ def upload_and_get_url(
     except Exception:
         pass
 
-    # Intento 2: URL firmada (bucket privado)
+    # Firmada (bucket privado)
     try:
         signed = client.storage.from_(bucket_name).create_signed_url(path, 60 * 60)  # 1h
         return {"ok": True, "signed_url": signed, "path": path}
