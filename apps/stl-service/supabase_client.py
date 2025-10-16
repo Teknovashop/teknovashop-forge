@@ -2,17 +2,13 @@
 import os
 import io
 from typing import Optional, Union, Dict, Any
-
 from supabase import create_client, Client
 
 _SUPABASE: Optional[Client] = None
 
 def _norm_url(url: str) -> str:
     url = (url or "").strip()
-    if not url:
-        return url
-    # la SDK insiste en el slash final para la parte de Storage
-    return url if url.endswith("/") else url + "/"
+    return url if url.endswith("/") else (url + "/") if url else url
 
 def get_client() -> Client:
     global _SUPABASE
@@ -20,59 +16,59 @@ def get_client() -> Client:
         return _SUPABASE
 
     url = _norm_url(os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or "")
-    # Preferimos SERVICE_ROLE para poder subir sin fricciones desde backend
-    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY") or ""
+    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
         raise RuntimeError("SUPABASE_URL o SUPABASE_*_KEY no configurados")
 
     _SUPABASE = create_client(url, key)
     return _SUPABASE
 
-def upload_and_get_url(fileobj: Union[bytes, io.BytesIO, io.BufferedIOBase],
-                       folder: str,
-                       filename: str,
-                       bucket: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def upload_and_get_url(
+    data: Union[bytes, io.BytesIO],
+    *,
+    bucket: Optional[str] = None,
+    folder: str = "",
+    filename: str = "",
+) -> Dict[str, Any]:
     """
-    Sube a Supabase Storage y retorna {'url', 'path'}.
-    - Acepta bytes o file-like.
-    - Usa bucket de entorno: SUPABASE_BUCKET o NEXT_PUBLIC_SUPABASE_BUCKET
+    Sube bytes STL a Supabase Storage y devuelve:
+    {
+      "ok": True/False,
+      "url": "https://... (si público)",
+      "signed_url": "https://... (si privado)",
+      "path": "folder/filename"
+    }
     """
-    try:
-        client = get_client()
-    except Exception:
-        return None
-
+    client = get_client()
     bucket_name = bucket or os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl"
-    path = f"{folder.strip().strip('/')}/{filename}".replace("//", "/")
+    if not filename:
+        filename = "model.stl"
+    folder = folder.strip("/")
 
-    # Aseguramos file-like
-    if isinstance(fileobj, (bytes, bytearray)):
-        bio = io.BytesIO(fileobj)
-    else:
-        bio = fileobj  # ya es file-like
+    path = f"{folder}/{filename}" if folder else filename
+    bio = io.BytesIO(data if isinstance(data, (bytes, bytearray)) else data.read())
+    bio.seek(0)
 
-    # La SDK maneja 'upsert' como parámetro, no como cabecera
     try:
         client.storage.from_(bucket_name).upload(
             path=path,
             file=bio,
-            file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000", "upsert": True},
+            file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000"},
         )
-    except Exception:
-        # si ya existe o algo falla, intentamos upsert explícito
-        try:
-            client.storage.from_(bucket_name).update(
-                path=path,
-                file=bio,
-                file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000"},
-            )
-        except Exception:
-            return None
+    except Exception as e:
+        return {"ok": False, "error": f"upload-failed: {e}", "path": path}
 
-    # URL pública
+    # Pública
     try:
         public_url = client.storage.from_(bucket_name).get_public_url(path)
+        if public_url:
+            return {"ok": True, "url": public_url, "path": path}
     except Exception:
         public_url = None
 
-    return {"url": public_url, "path": path}
+    # Firmada (bucket privado)
+    try:
+        signed = client.storage.from_(bucket_name).create_signed_url(path, 60 * 60)  # 1h
+        return {"ok": True, "signed_url": signed, "path": path}
+    except Exception as e:
+        return {"ok": False, "error": f"url-failed: {e}", "path": path}
