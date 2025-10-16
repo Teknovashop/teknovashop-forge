@@ -1,294 +1,149 @@
 # apps/stl-service/models.py
 from __future__ import annotations
 import math
-import traceback
-from typing import Callable, Dict, List, Mapping, Any
-
+from typing import Dict, Any, List, Callable, Optional
 import trimesh
-from trimesh.creation import box, cylinder, icosphere
+from trimesh.creation import box
 
-# ------------------------------
-# Utilidades booleanas robustas
-# ------------------------------
+# ---------- utilidades geométricas ----------
 
-def _difference_safe(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    """
-    Intenta a - b usando varios motores. Si todo falla, devuelve 'a' sin romper.
-    """
-    # 1) motor por defecto de trimesh
-    try:
-        return a.difference(b)
-    except Exception:
-        pass
+def deg(rad):  # por si alguna vez nos pasan radianes
+    return rad * 180.0 / math.pi
 
-    # 2) OpenSCAD si existe
-    try:
-        if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
-            return a.difference(b, engine="scad")
-    except Exception:
-        pass
+def rotz(deg_):
+    a = math.radians(deg_)
+    return trimesh.transformations.rotation_matrix(a, (0, 0, 1))
 
-    # 3) último recurso: no romper
-    traceback.print_exc()
-    return a
+def roty(deg_):
+    a = math.radians(deg_)
+    return trimesh.transformations.rotation_matrix(a, (0, 1, 0))
 
+def rotx(deg_):
+    a = math.radians(deg_)
+    return trimesh.transformations.rotation_matrix(a, (1, 0, 0))
 
-def _union_safe(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
-    """
-    Une varias mallas. Evita convex_hull salvo último último recurso,
-    para no “rellenar huecos” y cambiar la forma.
-    """
-    meshes = [m for m in meshes if m is not None]
-    if not meshes:
-        return box(extents=(1, 1, 1))
+def translate(v):
+    return trimesh.transformations.translation_matrix(v)
 
-    # 1) union de trimesh
-    try:
-        return trimesh.boolean.union(meshes)
-    except Exception:
-        pass
+# ---------- TextOps: grabado / extrusión de texto ----------
+def apply_text_ops(mesh: trimesh.Trimesh, ops: List[Dict[str, Any]]) -> trimesh.Trimesh:
+    """Cada op: { text, font?, depth, height, pos:[x,y,z], rot:[rx,ry,rz], mode:'engrave'|'emboss' }"""
+    if not ops: 
+        return mesh
 
-    # 2) OpenSCAD si existe
-    try:
-        if hasattr(trimesh.interfaces, "scad") and trimesh.interfaces.scad.exists:
-            return trimesh.boolean.union(meshes, engine="scad")
-    except Exception:
-        pass
+    acc = mesh.copy()
+    for op in ops:
+        txt = op.get("text", "")
+        if not txt:
+            continue
+        depth = float(op.get("depth", 1.0))      # mm de extrusión
+        height = float(op.get("height", 10.0))   # mm de alto de letra
+        mode = op.get("mode", "engrave")         # engrave (resta) o emboss (suma)
+        px, py, pz = map(float, op.get("pos", [0, 0, 0]))
+        rx, ry, rz = map(float, op.get("rot", [0, 0, 0]))
 
-    # 3) concatenar (no booleano pero mantiene geometría combinada)
-    try:
-        return trimesh.util.concatenate(meshes)
-    except Exception:
-        pass
+        # Texto → Path2D → extrude
+        path = trimesh.path.creation.text(text=txt, font=op.get("font", None), font_size=height)
+        if path is None or len(path.entities) == 0:
+            # fallback a una barrita si la lib no tiene font
+            glyph = box(extents=(height, depth, depth/2.0))
+            glyph.apply_transform(translate([px, py, pz]))
+        else:
+            poly = path.to_polygons()
+            if not poly:
+                continue
+            text_vol = trimesh.creation.extrude_polygon(poly, height=depth)
+            # rotación y posicionamiento
+            T = translate([px, py, pz]) @ rotx(rx) @ roty(ry) @ rotz(rz)
+            text_vol.apply_transform(T)
+            glyph = text_vol
 
-    # 4) último recurso: primera
-    return meshes[0]
+        if mode == "engrave":
+            acc = acc.difference(glyph, engine="scad")
+        else:
+            acc = acc.union(glyph, engine="scad")
+    return acc
 
+# ---------- builders reales existentes ----------
+def build_cable_tray(p: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(p.get("length", p.get("largo", 120)))
+    W = float(p.get("width", p.get("ancho", 100)))
+    H = float(p.get("height", p.get("alto", 60)))
+    t = float(p.get("wall", p.get("grosor", 3)))
+    outer = box(extents=(L, W, t))
+    ribs = box(extents=(L, t, H))
+    ribs.apply_transform(translate([0, 0, H/2]))
+    tray = outer.union(ribs, engine="scad")
+    return tray
 
-def _ensure_watertight(m: trimesh.Trimesh) -> trimesh.Trimesh:
-    """
-    Intenta devolver algo imprimible aunque las booleanas no sean perfectas.
-    """
-    try:
-        if not m.is_watertight:
-            m = m.fill_holes()
-        if not m.is_watertight:
-            # como último recurso: convex_hull
-            m = m.convex_hull
-    except Exception:
-        traceback.print_exc()
+def build_vesa_adapter(p: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(p.get("largo", 120))
+    W = float(p.get("ancho", 100))
+    t = float(p.get("grosor", 3))
+    plate = box(extents=(L, W, t))
+    plate.apply_transform(translate([0, 0, t/2]))
+    # cuatro agujeros 75x75 o 100x100 según ancho/largo
+    pitch = 75.0 if min(L, W) < 110 else 100.0
+    hole_r = 3.25
+    holes = []
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            c = trimesh.creation.cylinder(radius=hole_r, height=t * 2)
+            c.apply_transform(translate([sx * pitch/2, sy * pitch/2, t/2]))
+            holes.append(c)
+    mask = trimesh.util.concatenate(holes)
+    return plate.difference(mask, engine="scad")
+
+def build_router_mount(p: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(p.get("largo", 120))
+    W = float(p.get("ancho", 60))
+    t = float(p.get("grosor", 3))
+    base = box(extents=(L, W, t))
+    lip = box(extents=(L, t, W/2))
+    lip.apply_transform(translate([0, (W/2 - t/2), W/4]))
+    return base.union(lip, engine="scad")
+
+# ---------- fallback y registry con alias ----------
+def build_plate_fallback(p: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(p.get("largo", p.get("length", 100)))
+    W = float(p.get("ancho", p.get("width", 100)))
+    t = float(p.get("grosor", p.get("wall", 3)))
+    m = box(extents=(L, W, t))
+    m.apply_transform(translate([0,0,t/2]))
     return m
 
+REGISTRY: Dict[str, Callable[[Dict[str, Any]], trimesh.Trimesh]] = {
+    "cable_tray": build_cable_tray,
+    "vesa_adapter": build_vesa_adapter,
+    "router_mount": build_router_mount,
 
-# -------------------------------------
-# Agujeros por la cara superior (Z+)
-# -------------------------------------
+    # alias desde el front para no romper UI:
+    "Cable Tray (bandeja)": build_cable_tray,
+    "VESA Adapter": build_vesa_adapter,
+    "Router Mount (L)": build_router_mount,
 
-def _add_holes_top(base: trimesh.Trimesh, holes: List[Mapping[str, Any]], L: float, H: float) -> trimesh.Trimesh:
-    if not holes:
-        return base
-
-    out = base
-    for h in holes:
-        try:
-            # Acepta dict o pydantic
-            x_mm = float(h.get("x_mm") if isinstance(h, dict) else getattr(h, "x_mm", 0.0))
-            d_mm = float(h.get("d_mm") if isinstance(h, dict) else getattr(h, "d_mm", 0.0))
-        except Exception:
-            continue
-
-        if d_mm <= 0:
-            continue
-
-        r = max(0.15, d_mm / 2.0)
-        cx = x_mm - (L / 2.0)
-        # cilindro largo para atravesar con margen
-        drill = cylinder(radius=r, height=max(H * 3.0, 60.0), sections=64)
-        drill.apply_translation((cx, 0.0, H))  # taladro “desde arriba”
-        out = _difference_safe(out, drill)
-
-    return out
-
-
-# ---------------------------------------------
-# Fillet superior: aristas + esquinas (robusto)
-# ---------------------------------------------
-
-def _fillet_top_edges(base: trimesh.Trimesh, L: float, W: float, H: float, r: float) -> trimesh.Trimesh:
-    """
-    Aproximación de fillet en las 4 aristas superiores exteriores:
-      - Restamos 4 cilindros en aristas
-      - Restamos 4 esferas en esquinas
-    Más estable que solo cilindros.
-    """
-    if r <= 0:
-        return base
-
-    r = float(max(0.2, min(r, min(L, W) * 0.25)))
-    out = base
-
-    # Cilindros alineados con X (en Y=±W/2)
-    cyl_x = cylinder(radius=r, height=L + 2 * r, sections=64)
-    cyl_x.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0]))
-
-    c1 = cyl_x.copy(); c1.apply_translation((0.0, +W / 2.0, H - r))
-    c2 = cyl_x.copy(); c2.apply_translation((0.0, -W / 2.0, H - r))
-
-    # Cilindros alineados con Y (en X=±L/2)
-    cyl_y = cylinder(radius=r, height=W + 2 * r, sections=64)
-    cyl_y.apply_transform(trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0]))
-
-    c3 = cyl_y.copy(); c3.apply_translation((+L / 2.0, 0.0, H - r))
-    c4 = cyl_y.copy(); c4.apply_translation((-L / 2.0, 0.0, H - r))
-
-    # Esferas en esquinas superiores (suaviza la intersección de cilindros)
-    s = icosphere(subdivisions=3, radius=r)
-    s1 = s.copy(); s1.apply_translation((+L / 2.0, +W / 2.0, H - r))
-    s2 = s.copy(); s2.apply_translation((+L / 2.0, -W / 2.0, H - r))
-    s3 = s.copy(); s3.apply_translation((-L / 2.0, +W / 2.0, H - r))
-    s4 = s.copy(); s4.apply_translation((-L / 2.0, -W / 2.0, H - r))
-
-    cutters = [c1, c2, c3, c4, s1, s2, s3, s4]
-    for cutter in cutters:
-        try:
-            out = _difference_safe(out, cutter)
-        except Exception:
-            traceback.print_exc()
-            # seguimos si una resta falla
-            continue
-
-    return out
-
-
-# ----------------------------
-# Constructores de modelos
-# ----------------------------
-
-def cable_tray(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
-    t = max(0.6, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    outer = box(extents=(L, W, H)); outer.apply_translation((0, 0, H / 2.0))
-    inner_h = max(0.0, H - t)
-    inner = box(extents=(max(0.1, L - 2 * t), max(0.1, W - 2 * t), inner_h))
-    inner.apply_translation((0, 0, inner_h / 2.0))
-
-    shell = _difference_safe(outer, inner)
-    shell = _add_holes_top(shell, holes, L, H)
-    if fillet_r > 0:
-        shell = _fillet_top_edges(shell, L, W, H, fillet_r)
-    return _ensure_watertight(shell)
-
-
-def vesa_adapter(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    L, W = float(p["length_mm"]), float(p["width_mm"])
-    t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t / 2.0))
-
-    spacing = 100.0 if min(L, W) >= 110 else 75.0
-    for sx in (-spacing / 2, spacing / 2):
-        for sy in (-spacing / 2, spacing / 2):
-            drill = cylinder(radius=2.5, height=max(t * 3, 10), sections=48)
-            drill.apply_translation((sx, sy, t))
-            plate = _difference_safe(plate, drill)
-
-    plate = _add_holes_top(plate, holes, L, t)
-    if fillet_r > 0:
-        plate = _fillet_top_edges(plate, L, W, t, fillet_r)
-    return _ensure_watertight(plate)
-
-
-def router_mount(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
-    t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    base = box(extents=(L, W, t)); base.apply_translation((0, 0, t / 2.0))
-    wall = box(extents=(L, t, H)); wall.apply_translation((0, (W / 2.0) - (t / 2.0), H / 2.0))
-
-    m = _union_safe([base, wall])
-    m = _add_holes_top(m, holes, L, t)
-    if fillet_r > 0:
-        m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
-    return _ensure_watertight(m)
-
-
-def wall_bracket(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
-    t = max(2.0, float(p.get("thickness_mm", 3.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    foot = box(extents=(L, W, t)); foot.apply_translation((0, 0, t / 2.0))
-    up = box(extents=(t, W, H)); up.apply_translation(((L / 2.0) - (t / 2.0), 0, H / 2.0))
-    m = _union_safe([foot, up])
-
-    pattern = [{"x_mm": L * 0.25, "d_mm": 6.0}, {"x_mm": L * 0.75, "d_mm": 6.0}]
-    m = _add_holes_top(m, (holes or []) + pattern, L, t)
-
-    if fillet_r > 0:
-        m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
-    return _ensure_watertight(m)
-
-
-def desk_hook(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    """
-    Gancho simple en J: “columna” + “brazo”. Sin boolean union agresivo.
-    """
-    L, W, H = float(p["length_mm"]), float(p["width_mm"]), float(p["height_mm"])
-    t = max(3.0, float(p.get("thickness_mm", 4.0)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    spine = box(extents=(t, W, H)); spine.apply_translation((-(L / 2.0) + t / 2.0, 0, H / 2.0))
-    arm = box(extents=(L * 0.6, W, t)); arm.apply_translation((-(L * 0.2), 0, t / 2.0))
-
-    m = _union_safe([spine, arm])  # usa concatenate si falla union → no 500
-    m = _add_holes_top(m, holes, L, max(H, t))
-    if fillet_r > 0:
-        m = _fillet_top_edges(m, L, W, max(H, t), fillet_r)
-    return _ensure_watertight(m)
-
-
-def fan_guard(p: Mapping[str, float], holes: List[Mapping[str, Any]]) -> trimesh.Trimesh:
-    """
-    Rejilla plana: placa de espesor t con apertura circular central y 4 taladros.
-    """
-    L, W = float(p["length_mm"]), float(p["width_mm"])
-    t = max(2.0, float(p.get("thickness_mm", 2.5)))
-    fillet_r = float(p.get("fillet_r_mm", 0.0) or 0.0)
-
-    plate = box(extents=(L, W, t)); plate.apply_translation((0, 0, t / 2.0))
-
-    # Apertura central
-    r_open = max(10.0, min(L, W) * 0.35)
-    open_cyl = cylinder(radius=r_open, height=max(t * 3, 10.0), sections=96)
-    open_cyl.apply_translation((0, 0, t))
-    plate = _difference_safe(plate, open_cyl)
-
-    # 4 agujeros de fijación
-    pad = min(L, W) * 0.6
-    for sx in (-pad / 2, pad / 2):
-        for sy in (-pad / 2, pad / 2):
-            drill = cylinder(radius=2.5, height=max(t * 3, 10), sections=48)
-            drill.apply_translation((sx, sy, t))
-            plate = _difference_safe(plate, drill)
-
-    plate = _add_holes_top(plate, holes, L, t)
-    if fillet_r > 0:
-        plate = _fillet_top_edges(plate, L, W, t, fillet_r)
-    return _ensure_watertight(plate)
-
-
-# -----------------------------
-# Registro visible al backend
-# -----------------------------
-REGISTRY: Dict[str, Callable[[Mapping[str, float], List[Mapping[str, Any]]], trimesh.Trimesh]] = {
-    "cable_tray": cable_tray,
-    "vesa_adapter": vesa_adapter,
-    "router_mount": router_mount,
-    "wall_bracket": wall_bracket,
-    "desk_hook": desk_hook,
-    "fan_guard": fan_guard,
+    # alias que existen en el selector pero aún sin diseño “real”:
+    "Cable Clip": build_plate_fallback,
+    "Headset Stand": build_plate_fallback,
+    "Phone Dock (USB-C)": build_plate_fallback,
+    "Tablet Stand": build_plate_fallback,
+    "SSD Holder (2.5\")": build_plate_fallback,
+    "Raspberry Pi Case": build_plate_fallback,
+    "GoPro Mount": build_plate_fallback,
+    "Wall Hook": build_plate_fallback,
+    "Monitor Stand": build_plate_fallback,
+    "Laptop Stand": build_plate_fallback,
+    "Mic Arm Clip": build_plate_fallback,
+    "Camera Plate 1/4\"": build_plate_fallback,
+    "USB Hub Holder": build_plate_fallback,
 }
+
+def build_model(slug: str, params: Dict[str, Any], *, text_ops: Optional[List[Dict[str, Any]]] = None) -> trimesh.Trimesh:
+    builder = REGISTRY.get(slug)
+    if builder is None and slug in ("raspi_case", "hub_holder", "camera_plate", "mic_arm_clip"):
+        builder = build_plate_fallback  # alias por slug interno
+    if builder is None:
+        raise KeyError(f"Model '{slug}' not found")
+    mesh = builder(params or {})
+    mesh = apply_text_ops(mesh, text_ops or [])
+    return mesh
