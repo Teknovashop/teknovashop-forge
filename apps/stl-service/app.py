@@ -1,23 +1,20 @@
 # /app.py
 import io
 import os
+import tempfile
 from typing import Any, Dict, Iterable, Optional, Tuple, Union, Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# Tus modelos existentes
-from models import REGISTRY, ALIASES  # definidos en models/__init__.py
-
+from models import REGISTRY, ALIASES
 from supabase_client import upload_and_get_url
 
 # ---------------------------------------------------------------------
-# Utilidades locales
+# Utilidades
 # ---------------------------------------------------------------------
-
 def _norm_model_key(k: str) -> str:
-    # normaliza: espacios, mayúsculas, guiones -> underscores
     return (k or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 def _first(d: Dict[str, Any], keys: Iterable[str]) -> Any:
@@ -26,73 +23,111 @@ def _first(d: Dict[str, Any], keys: Iterable[str]) -> Any:
             return d[k]
     return None
 
-def _as_stl_bytes(
-    result: Any,
-) -> Tuple[bytes, Optional[str]]:
+def _bytes_from_filelike(obj: Any) -> Optional[bytes]:
+    try:
+        read = getattr(obj, "read", None)
+        if callable(read):
+            data = read()
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+            if isinstance(data, str):
+                return data.encode("utf-8")
+    except Exception:
+        pass
+    return None
+
+def _export_via_tempfile(callable_with_path, suffix: str = ".stl") -> bytes:
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        callable_with_path(tmp_path)
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     """
     Normaliza la salida del builder a (stl_bytes, filename|None).
-    Acepta:
-      - bytes/bytearray
-      - io.BytesIO
-      - str (ruta a archivo .stl)
-      - (payload, filename?) en tuple/list
-      - dict con 'bytes'/'buffer'/'stl'/'path'/'filename'
-      - objetos con .export(fileobj=..., file_type="stl") o .to_stl()
     """
     filename: Optional[str] = None
 
-    # tuple/list -> desenpaquetar
+    # 1) tuple/list -> (payload, filename?)
     if isinstance(result, (tuple, list)) and len(result) > 0:
-        maybe_payload = result[0]
+        payload = result[0]
         if len(result) > 1 and isinstance(result[1], str):
             filename = result[1]
-        result = maybe_payload
+        result = payload
 
-    # dict -> buscar variantes comunes
+    # 2) dict
     if isinstance(result, dict):
         filename = _first(result, ("filename", "name")) or filename
-        # bytes directos
         payload = _first(result, ("bytes", "buffer", "stl"))
         if isinstance(payload, (bytes, bytearray)):
             return bytes(payload), filename
         if isinstance(payload, io.BytesIO):
             return payload.getvalue(), filename
-        # ruta
         path = _first(result, ("path", "file", "filepath"))
         if isinstance(path, str) and path:
             with open(path, "rb") as f:
                 return f.read(), filename or os.path.basename(path)
-        # si no hubo nada válido, seguir abajo (por si vino un objeto exportable)
-
+        # también soporta meter el objeto exportable dentro:
         result = _first(result, ("mesh", "object", "model", "geom")) or result
 
-    # bytes/BytesIO
+    # 3) bytes/bytearray/BytesIO
     if isinstance(result, (bytes, bytearray)):
         return bytes(result), filename
     if isinstance(result, io.BytesIO):
         return result.getvalue(), filename
 
-    # ruta a fichero
+    # 4) file-like con .read()
+    fb = _bytes_from_filelike(result)
+    if fb is not None:
+        return fb, filename
+
+    # 5) ruta a fichero o STL en texto
     if isinstance(result, str) and result:
-        # si es texto STL (muy raro), conviértelo a bytes igual
         if os.path.isfile(result):
             with open(result, "rb") as f:
                 return f.read(), filename or os.path.basename(result)
+        # puede ser STL ASCII en texto
         return result.encode("utf-8"), filename or "model.stl"
 
-    # objetos con .export(fileobj=..., file_type="stl")
+    # 6) __bytes__()
+    try:
+        to_bytes = getattr(result, "__bytes__", None)
+        if callable(to_bytes):
+            return bytes(result), filename
+    except Exception:
+        pass
+
+    # 7) Objetos con .export(...)
     export = getattr(result, "export", None)
     if callable(export):
+        # a) acepta file_type y fileobj (trimesh)
         bio = io.BytesIO()
         try:
-            export(fileobj=bio, file_type="stl")  # trimesh, etc.
+            export(fileobj=bio, file_type="stl")  # muchas libs
             return bio.getvalue(), filename
         except Exception:
-            bio = io.BytesIO()
-            export(bio)  # por si la firma es distinta
-            return bio.getvalue(), filename
+            # b) acepta sólo fileobj
+            try:
+                bio = io.BytesIO()
+                export(bio)
+                return bio.getvalue(), filename
+            except Exception:
+                # c) acepta sólo ruta → tempfile
+                try:
+                    data = _export_via_tempfile(lambda p: export(p), ".stl")
+                    return data, filename
+                except Exception:
+                    pass  # seguimos
 
-    # objetos con .to_stl()
+    # 8) .to_stl()
     to_stl = getattr(result, "to_stl", None)
     if callable(to_stl):
         out = to_stl()
@@ -106,15 +141,62 @@ def _as_stl_bytes(
                     return f.read(), filename or os.path.basename(out)
             return out.encode("utf-8"), filename or "model.stl"
 
-    raise HTTPException(status_code=500, detail="Builder must return bytes or BytesIO")
+    # 9) trimesh (Trimesh / Scene)
+    try:
+        import trimesh
+        if isinstance(result, (trimesh.Trimesh, trimesh.Scene)):
+            data = result.export(file_type="stl")  # devuelve bytes
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data), filename
+            if isinstance(data, str):
+                return data.encode("utf-8"), filename or "model.stl"
+    except Exception:
+        pass
+
+    # 10) cadquery (Workplane / toStlString / exporters.export)
+    try:
+        import cadquery as cq  # type: ignore
+        from cadquery import exporters  # type: ignore
+
+        if isinstance(result, cq.Workplane) or hasattr(result, "toStlString"):
+            # a) toStlString
+            tss = getattr(result, "toStlString", None)
+            if callable(tss):
+                s = tss()
+                if isinstance(s, str):
+                    return s.encode("utf-8"), filename or "model.stl"
+            # b) exporters.export a ruta temporal
+            try:
+                data = _export_via_tempfile(lambda p: exporters.export(result, p))
+                return data, filename
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 11) .save(path) → usar temporal
+    save = getattr(result, "save", None)
+    if callable(save):
+        try:
+            data = _export_via_tempfile(lambda p: save(p))
+            return data, filename
+        except Exception:
+            pass
+
+    # Si llegamos aquí, no sabemos convertirlo
+    typename = type(result).__name__
+    methods = [m for m in dir(result) if not m.startswith("_")]
+    preview = ", ".join(methods[:20])
+    raise HTTPException(
+        status_code=500,
+        detail=f"Builder must return bytes or BytesIO (got {typename}; methods: {preview} …)"
+    )
 
 # ---------------------------------------------------------------------
 # FastAPI
 # ---------------------------------------------------------------------
-
 app = FastAPI()
 
-# CORS
 allowed_origins = [
     os.getenv("FRONTEND_ORIGIN")
     or os.getenv("NEXT_PUBLIC_SITE_URL")
@@ -128,7 +210,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------- Esquemas de entrada ---------
+# --------- Esquemas ---------
 class Hole(BaseModel):
     x_mm: float
     y_mm: float
@@ -145,7 +227,6 @@ class TextOp(BaseModel):
     x: float = 0.0
     y: float = 0.0
     depth: float | None = None
-    # En el futuro: rx, ry, rz, z, align, etc.
 
 class Params(BaseModel):
     length_mm: float = Field(gt=0)
@@ -161,10 +242,9 @@ class GenerateBody(BaseModel):
     model: str
     params: Params
 
-# --------- Salud (rico) ---------
+# --------- Salud ---------
 @app.get("/health")
 async def health(request: Request):
-    # Modelos y alias visibles (sin secretos)
     env_snapshot = {
         "SUPABASE_URL_set": bool(os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")),
         "SUPABASE_BUCKET": os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl",
@@ -185,11 +265,9 @@ async def generate(body: GenerateBody, request: Request):
     raw_key = body.model or ""
     model_key = _norm_model_key(raw_key)
 
-    # Look-up directo
     entry: Optional[Union[Callable[..., Any], Dict[str, Any]]] = REGISTRY.get(model_key)
-    # Alias
     if entry is None and isinstance(ALIASES, dict):
-        alias = ALIASES.get(model_key) or ALIASES.get(raw_key)  # por si el alias está en otro formato
+        alias = ALIASES.get(model_key) or ALIASES.get(raw_key)
         if isinstance(alias, str):
             entry = REGISTRY.get(_norm_model_key(alias))
 
@@ -200,7 +278,6 @@ async def generate(body: GenerateBody, request: Request):
             detail=f"Model '{raw_key}' not found. Available: {', '.join(available)}"
         )
 
-    # Puede ser una función o un dict {'make' | 'builder': fn}
     make_fn: Optional[Callable[..., Any]] = None
     if callable(entry):
         make_fn = entry
@@ -210,7 +287,6 @@ async def generate(body: GenerateBody, request: Request):
     if not callable(make_fn):
         raise HTTPException(status_code=500, detail="Invalid model registry entry (no callable).")
 
-    # Parametría plana que algunos builders esperan
     p: Dict[str, Any] = {
         "length_mm": float(body.params.length_mm),
         "width_mm": float(body.params.width_mm),
@@ -222,21 +298,17 @@ async def generate(body: GenerateBody, request: Request):
         "textOps": [t.model_dump() for t in body.params.textOps],
     }
 
-    # Construcción
     try:
-        result_any = make_fn(p)  # llama al builder real de tu modelo
+        result_any = make_fn(p)
+        print(f"[forge] builder '{model_key}' -> {type(result_any).__name__}")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Model build error: {e}")
 
-    # Normaliza a bytes STL
     stl_bytes, suggested_name = _as_stl_bytes(result_any)
-
-    # Nombre de salida
     filename = suggested_name or f"{model_key}.stl"
 
-    # Subida a Supabase
     up = upload_and_get_url(
         stl_bytes,
         bucket=os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl",
@@ -247,7 +319,6 @@ async def generate(body: GenerateBody, request: Request):
     if not up.get("ok"):
         raise HTTPException(status_code=500, detail=up.get("error") or "Upload failed")
 
-    # Respuesta consistente para el front
     resp: Dict[str, Any] = {"ok": True, "path": up.get("path"), "filename": filename}
     if up.get("url"):
         resp["stl_url"] = up["url"]
