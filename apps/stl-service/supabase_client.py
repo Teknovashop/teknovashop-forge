@@ -1,4 +1,3 @@
-# apps/stl-service/supabase_client.py
 import os
 import io
 from typing import Optional, Union, Dict, Any
@@ -8,7 +7,7 @@ _SUPABASE: Optional[Client] = None
 
 def _norm_url(url: str) -> str:
     url = (url or "").strip()
-    return url if url.endswith("/") else (url + "/") if url else url
+    return url if not url or url.endswith("/") else (url + "/")
 
 def get_client() -> Client:
     global _SUPABASE
@@ -24,21 +23,12 @@ def get_client() -> Client:
     return _SUPABASE
 
 def upload_and_get_url(
-    data: Union[bytes, io.BytesIO],
+    data: Union[bytes, bytearray, io.BytesIO],
     *,
     bucket: Optional[str] = None,
     folder: str = "",
     filename: str = "",
 ) -> Dict[str, Any]:
-    """
-    Sube bytes STL a Supabase Storage y devuelve:
-    {
-      "ok": True/False,
-      "url": "https://... (si público)",
-      "signed_url": "https://... (si privado)",
-      "path": "folder/filename"
-    }
-    """
     client = get_client()
     bucket_name = bucket or os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl"
     if not filename:
@@ -47,19 +37,20 @@ def upload_and_get_url(
 
     path = f"{folder}/{filename}" if folder else filename
 
-    # Aseguramos bytes (no BytesIO) para compatibilidad con supabase-py que corre en Render
-    raw: bytes
-    if isinstance(data, (bytes, bytearray)):
-        raw = bytes(data)
+    # ---> AQUI: garantizamos BYTES
+    if isinstance(data, io.BytesIO):
+        payload = data.getvalue()
+    elif isinstance(data, (bytes, bytearray)):
+        payload = bytes(data)
     else:
-        bio = data  # BytesIO
-        bio.seek(0)
-        raw = bio.getvalue()
+        raise TypeError("upload_and_get_url: data must be bytes/bytearray/BytesIO")
 
     try:
+        # La SDK acepta `upload(path, file=...)` o `upload(path, data=bytes)`.
+        # Para evitar problemas, usamos bytes crudos.
         client.storage.from_(bucket_name).upload(
             path=path,
-            file=raw,  # <- bytes, no BytesIO
+            file=payload,
             file_options={"content-type": "model/stl", "cache-control": "public, max-age=31536000"},
         )
     except Exception as e:
