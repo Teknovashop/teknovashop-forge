@@ -12,9 +12,7 @@ from models import REGISTRY, ALIASES
 from supabase_client import upload_and_get_url
 
 
-# ---------------------------------------------------------------------
-# Utilidades
-# ---------------------------------------------------------------------
+# ------------------------------ Utilidades ------------------------------
 def _norm_model_key(k: str) -> str:
     return (k or "").strip().lower().replace("-", "_").replace(" ", "_")
 
@@ -52,52 +50,48 @@ def _export_via_tempfile(callable_with_path, suffix: str = ".stl") -> bytes:
             pass
 
 
-# ---------------------------------------------------------------------
-# Normalizador de salidas -> STL bytes
-# ---------------------------------------------------------------------
+# --------------- Normalizador de salida -> bytes STL --------------------
 def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     """
-    Normaliza la salida del builder a (stl_bytes, filename|None).
-
-    Acepta:
-      - bytes / bytearray / io.BytesIO / file-like .read()
-      - str (ruta o STL ASCII)
-      - dict con {bytes|buffer|stl|path|file|filepath|filename|name} o con objeto en {mesh|object|model|geom}
-      - tuple/list:
-          * (payload, "nombre.stl")
-          * lista de piezas -> fusiona en una escena (si trimesh está disponible);
-            si no, toma el primer STL convertible
-      - objetos con .export(...), .to_stl(), .save(path)
-      - objetos trimesh (Trimesh/Scene) y cadquery (Workplane)
+    Devuelve (stl_bytes, filename|None) a partir de distintos tipos:
+    - bytes / bytearray / io.BytesIO / file-like .read()
+    - str (ruta a .stl o STL ASCII)
+    - dict con {bytes|buffer|stl|path|file|filepath|filename|name} o con objeto en {mesh|object|model|geom}
+    - tuple/list:
+        * (payload, "nombre.stl")
+        * lista de piezas (se intenta fusionar vía trimesh; si no, se toma la 1ª válida)
+    - objetos con .export(...), .to_stl(), .save(path)
+    - trimesh.Trimesh / trimesh.Scene
+    - cadquery.Workplane
     """
     filename: Optional[str] = None
 
-    # --- LISTAS/TUPLAS ---
+    # --- LISTA/TUPLA ---
     if isinstance(result, (list, tuple)):
         items = list(result)
         if os.getenv("DEBUG_FORGE"):
-            print(f"[forge] normalize:list/tuple len= {len(items)}")
+            print(f"[forge] normalize:list/tuple len={len(items)}")
 
         if len(items) == 0:
             raise HTTPException(
                 status_code=422,
-                detail="Builder returned an empty list (no geometry). Fix the model to return a mesh/scene."
+                detail="Builder returned an empty list (no geometry). Fix the builder to return a mesh/scene."
             )
 
-        # Caso (payload, "nombre.stl")
+        # (payload, "nombre.stl")
         if len(items) == 2 and isinstance(items[1], str) and not isinstance(items[0], str):
             payload = items[0]
             filename = items[1] if items[1].lower().endswith(".stl") else items[1]
             data, fn = _as_stl_bytes(payload)
             return data, (filename or fn)
 
-        # Si hay strings *.stl incluidos, úsalo como nombre sugerido
+        # sugerencia de nombre si hay *.stl
         for it in items:
             if isinstance(it, str) and it.lower().endswith(".stl"):
                 filename = it
                 break
 
-        # Pre-procesa: si hay callables, intenta invocarlos sin args
+        # si hay callables, prueba a invocarlos sin args
         pre_items: List[Any] = []
         for it in items:
             if callable(it):
@@ -107,7 +101,7 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
                     pass
             pre_items.append(it)
 
-        # Intento 1: convertir TODOS a bytes STL
+        # intenta convertir todas a STL
         stl_blobs: List[bytes] = []
         first_name: Optional[str] = filename
         for it in pre_items:
@@ -120,44 +114,34 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
             except Exception:
                 continue
 
+        if len(stl_blobs) == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Builder returned a list but none of the items are convertible to STL."
+            )
         if len(stl_blobs) == 1:
             return stl_blobs[0], first_name
 
-        if len(stl_blobs) > 1:
-            # Intento 2: fusionar con trimesh
-            try:
-                import trimesh  # type: ignore
-                scene = trimesh.Scene()
-                for blob in stl_blobs:
-                    mesh = trimesh.load(io.BytesIO(blob), file_type="stl")
-                    if isinstance(mesh, trimesh.Scene):
-                        for g in mesh.geometry.values():
-                            scene.add_geometry(g)
-                    elif isinstance(mesh, trimesh.Trimesh):
-                        scene.add_geometry(mesh)
-                exported = scene.export(file_type="stl")
-                if os.getenv("DEBUG_FORGE"):
-                    print(f"[forge] merge: trimesh ok (n piezas={len(stl_blobs)})")
-                if isinstance(exported, (bytes, bytearray)):
-                    return bytes(exported), first_name
-                if isinstance(exported, str):
-                    return exported.encode("utf-8"), (first_name or "model.stl")
-            except Exception as e:
-                if os.getenv("DEBUG_FORGE"):
-                    print(f"[forge] merge: trimesh failed → {e}. Fallback a primera pieza")
-                return stl_blobs[0], first_name
-
-        # Intento 3: si solo hay un elemento no-str, probarlo
-        non_str = [x for x in pre_items if not isinstance(x, str)]
-        if len(non_str) == 1:
-            data, fn = _as_stl_bytes(non_str[0])
-            return data, (filename or fn)
-
-        # Nada convertible
-        raise HTTPException(
-            status_code=422,
-            detail="Builder returned a list but none of the items are convertible to STL."
-        )
+        # intenta fusionar con trimesh
+        try:
+            import trimesh  # type: ignore
+            scene = trimesh.Scene()
+            for blob in stl_blobs:
+                mesh = trimesh.load(io.BytesIO(blob), file_type="stl")
+                if isinstance(mesh, trimesh.Scene):
+                    for g in mesh.geometry.values():
+                        scene.add_geometry(g)
+                elif isinstance(mesh, trimesh.Trimesh):
+                    scene.add_geometry(mesh)
+            exported = scene.export(file_type="stl")
+            if isinstance(exported, (bytes, bytearray)):
+                return bytes(exported), first_name
+            if isinstance(exported, str):
+                return exported.encode("utf-8"), (first_name or "model.stl")
+        except Exception as e:
+            if os.getenv("DEBUG_FORGE"):
+                print(f"[forge] trimesh merge failed → {e}. Returning first item.")
+            return stl_blobs[0], first_name
 
     # --- DICT ---
     if isinstance(result, dict):
@@ -168,13 +152,11 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
         if isinstance(payload, io.BytesIO):
             return payload.getvalue(), filename
 
-        # ruta
         path = _first(result, ("path", "file", "filepath"))
         if isinstance(path, str) and path:
             with open(path, "rb") as f:
                 return f.read(), filename or os.path.basename(path)
 
-        # Objeto embebido exportable
         result = _first(result, ("mesh", "object", "model", "geom")) or result
 
     # --- BYTES/BYTESIO ---
@@ -188,7 +170,7 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     if fb is not None:
         return fb, filename
 
-    # --- STR (ruta o STL ASCII) ---
+    # --- STR (ruta o ASCII) ---
     if isinstance(result, str) and result:
         if os.path.isfile(result):
             with open(result, "rb") as f:
@@ -196,14 +178,11 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
         return result.encode("utf-8"), filename or "model.stl"
 
     # --- __bytes__() ---
-    try:
-        to_bytes = getattr(result, "__bytes__", None)
-        if callable(to_bytes):
-            return bytes(result), filename
-    except Exception:
-        pass
+    to_bytes = getattr(result, "__bytes__", None)
+    if callable(to_bytes):
+        return bytes(result), filename
 
-    # --- export(...), varias variantes ---
+    # --- export(...) ---
     export = getattr(result, "export", None)
     if callable(export):
         bio = io.BytesIO()
@@ -216,11 +195,8 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
                 export(bio)
                 return bio.getvalue(), filename
             except Exception:
-                try:
-                    data = _export_via_tempfile(lambda p: export(p), ".stl")
-                    return data, filename
-                except Exception:
-                    pass
+                data = _export_via_tempfile(lambda p: export(p), ".stl")
+                return data, filename
 
     # --- to_stl() ---
     to_stl = getattr(result, "to_stl", None)
@@ -252,29 +228,22 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     try:
         import cadquery as cq  # type: ignore
         from cadquery import exporters  # type: ignore
-
         if isinstance(result, cq.Workplane) or hasattr(result, "toStlString"):
             tss = getattr(result, "toStlString", None)
             if callable(tss):
                 s = tss()
                 if isinstance(s, str):
                     return s.encode("utf-8"), filename or "model.stl"
-            try:
-                data = _export_via_tempfile(lambda p: exporters.export(result, p))
-                return data, filename
-            except Exception:
-                pass
+            data = _export_via_tempfile(lambda p: exporters.export(result, p))
+            return data, filename
     except Exception:
         pass
 
     # --- save(path) ---
     save = getattr(result, "save", None)
     if callable(save):
-        try:
-            data = _export_via_tempfile(lambda p: save(p))
-            return data, filename
-        except Exception:
-            pass
+        data = _export_via_tempfile(lambda p: save(p))
+        return data, filename
 
     # Sin conversión posible
     typename = type(result).__name__
@@ -286,9 +255,7 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     )
 
 
-# ---------------------------------------------------------------------
-# FastAPI + CORS
-# ---------------------------------------------------------------------
+# --------------------------- FastAPI + CORS -----------------------------
 app = FastAPI()
 
 allowed_origins = [
@@ -337,7 +304,7 @@ class GenerateBody(BaseModel):
     params: Params
 
 
-# --------- Salud ---------
+# ------------------------------- Salud ---------------------------------
 @app.get("/health")
 async def health(request: Request):
     env_snapshot = {
@@ -355,7 +322,7 @@ async def health(request: Request):
     }
 
 
-# --------- Generate ---------
+# ------------------------------ Generate -------------------------------
 @app.post("/generate")
 async def generate(body: GenerateBody, request: Request):
     raw_key = body.model or ""
@@ -383,7 +350,6 @@ async def generate(body: GenerateBody, request: Request):
     if not callable(make_fn):
         raise HTTPException(status_code=500, detail="Invalid model registry entry (no callable).")
 
-    # Parámetros planos
     p: Dict[str, Any] = {
         "length_mm": float(body.params.length_mm),
         "width_mm": float(body.params.width_mm),
@@ -399,7 +365,6 @@ async def generate(body: GenerateBody, request: Request):
         print(f"[forge] incoming model: {raw_key} -> {model_key}")
         print(f"[forge] params: {p}")
 
-    # Construcción del modelo
     try:
         result_any = make_fn(p)
         if os.getenv("DEBUG_FORGE"):
@@ -413,21 +378,18 @@ async def generate(body: GenerateBody, request: Request):
     if isinstance(result_any, (list, tuple)) and len(result_any) == 0:
         raise HTTPException(
             status_code=422,
-            detail=f"Model '{model_key}' returned an empty list. Ensure the builder returns a mesh/scene."
+            detail=f"Model '{model_key}' returned an empty list. Ensure the builder returns a mesh/scene or bytes."
         )
 
-    # Normalización a STL bytes
     stl_bytes, suggested_name = _as_stl_bytes(result_any)
     filename = suggested_name or f"{model_key}.stl"
 
-    # Subida a Supabase
     up = upload_and_get_url(
         stl_bytes,
         bucket=os.getenv("SUPABASE_BUCKET") or os.getenv("NEXT_PUBLIC_SUPABASE_BUCKET") or "forge-stl",
         folder="stl",
         filename=filename,
     )
-
     if not up.get("ok"):
         raise HTTPException(status_code=500, detail=up.get("error") or "Upload failed")
 
