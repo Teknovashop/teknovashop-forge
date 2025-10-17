@@ -53,17 +53,82 @@ def _export_via_tempfile(callable_with_path, suffix: str = ".stl") -> bytes:
 def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     """
     Normaliza la salida del builder a (stl_bytes, filename|None).
+
+    Soporta:
+    - bytes / bytearray / BytesIO / file-like .read()
+    - str (ruta o STL ASCII)
+    - dict con {bytes|buffer|stl|path|file|filepath|filename|name} o con objeto en {mesh|object|model|geom}
+    - tuple/list:
+        * (payload, "nombre.stl")
+        * lista de objetos trimesh.Trimesh/Scene -> se combinan en una Scene
+        * si no son combinables, usa el primer ítem convertible
+    - objetos con .export(...), .to_stl(), .save(path)
+    - objetos trimesh / cadquery
     """
     filename: Optional[str] = None
 
-    # 1) tuple/list -> (payload, filename?)
-    if isinstance(result, (tuple, list)) and len(result) > 0:
-        payload = result[0]
-        if len(result) > 1 and isinstance(result[1], str):
-            filename = result[1]
-        result = payload
+    # ---------------------------
+    # LISTAS / TUPLAS
+    # ---------------------------
+    if isinstance(result, (list, tuple)):
+        items = list(result)
 
-    # 2) dict
+        # Si viene (payload, "nombre.stl")
+        if len(items) == 2 and isinstance(items[1], str) and not isinstance(items[0], str):
+            payload = items[0]
+            filename = items[1] if items[1].lower().endswith(".stl") else items[1]
+            data, fn = _as_stl_bytes(payload)
+            return data, (filename or fn)
+
+        # Si hay strings *.stl incluidos, toma uno como nombre sugerido
+        for it in items:
+            if isinstance(it, str) and it.lower().endswith(".stl"):
+                filename = it
+                break
+
+        # Si hay un único elemento no-str, normalízalo directamente
+        non_str = [x for x in items if not isinstance(x, str)]
+        if len(non_str) == 1:
+            data, fn = _as_stl_bytes(non_str[0])
+            return data, (filename or fn)
+
+        # Intento de combinación si son trimesh.* (Scene/Trimesh)
+        try:
+            import trimesh  # type: ignore
+            if all(isinstance(x, (trimesh.Trimesh, trimesh.Scene)) for x in non_str if x is not None):
+                scene = trimesh.Scene()
+                for x in non_str:
+                    if isinstance(x, trimesh.Scene):
+                        # añadir todas las geometrias de la escena
+                        for g in x.geometry.values():
+                            scene.add_geometry(g)
+                    elif isinstance(x, trimesh.Trimesh):
+                        scene.add_geometry(x)
+                exported = scene.export(file_type="stl")
+                if isinstance(exported, (bytes, bytearray)):
+                    return bytes(exported), filename
+                if isinstance(exported, str):
+                    return exported.encode("utf-8"), (filename or "model.stl")
+        except Exception:
+            pass  # si no está trimesh o falla, seguimos
+
+        # Fallback: recorre buscando el primer elemento convertible
+        for x in non_str:
+            try:
+                data, fn = _as_stl_bytes(x)
+                return data, (filename or fn)
+            except Exception:
+                continue
+
+        typename = "list"
+        raise HTTPException(
+            status_code=500,
+            detail=f"Builder must return bytes or BytesIO (got {typename} with no convertible items)"
+        )
+
+    # ---------------------------
+    # DICT
+    # ---------------------------
     if isinstance(result, dict):
         filename = _first(result, ("filename", "name")) or filename
         payload = _first(result, ("bytes", "buffer", "stl"))
@@ -75,29 +140,36 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
         if isinstance(path, str) and path:
             with open(path, "rb") as f:
                 return f.read(), filename or os.path.basename(path)
-        # también soporta meter el objeto exportable dentro:
+        # Objeto exportable embebido
         result = _first(result, ("mesh", "object", "model", "geom")) or result
 
-    # 3) bytes/bytearray/BytesIO
+    # ---------------------------
+    # BYTES / BYTESIO
+    # ---------------------------
     if isinstance(result, (bytes, bytearray)):
         return bytes(result), filename
     if isinstance(result, io.BytesIO):
         return result.getvalue(), filename
 
-    # 4) file-like con .read()
+    # ---------------------------
+    # FILE-LIKE .read()
+    # ---------------------------
     fb = _bytes_from_filelike(result)
     if fb is not None:
         return fb, filename
 
-    # 5) ruta a fichero o STL en texto
+    # ---------------------------
+    # STR (ruta o STL ASCII)
+    # ---------------------------
     if isinstance(result, str) and result:
         if os.path.isfile(result):
             with open(result, "rb") as f:
                 return f.read(), filename or os.path.basename(result)
-        # puede ser STL ASCII en texto
         return result.encode("utf-8"), filename or "model.stl"
 
-    # 6) __bytes__()
+    # ---------------------------
+    # __bytes__()
+    # ---------------------------
     try:
         to_bytes = getattr(result, "__bytes__", None)
         if callable(to_bytes):
@@ -105,29 +177,30 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     except Exception:
         pass
 
-    # 7) Objetos con .export(...)
+    # ---------------------------
+    # export(fileobj=..., file_type="stl") | export(path)
+    # ---------------------------
     export = getattr(result, "export", None)
     if callable(export):
-        # a) acepta file_type y fileobj (trimesh)
         bio = io.BytesIO()
         try:
-            export(fileobj=bio, file_type="stl")  # muchas libs
+            export(fileobj=bio, file_type="stl")
             return bio.getvalue(), filename
         except Exception:
-            # b) acepta sólo fileobj
             try:
                 bio = io.BytesIO()
                 export(bio)
                 return bio.getvalue(), filename
             except Exception:
-                # c) acepta sólo ruta → tempfile
                 try:
                     data = _export_via_tempfile(lambda p: export(p), ".stl")
                     return data, filename
                 except Exception:
-                    pass  # seguimos
+                    pass
 
-    # 8) .to_stl()
+    # ---------------------------
+    # to_stl()
+    # ---------------------------
     to_stl = getattr(result, "to_stl", None)
     if callable(to_stl):
         out = to_stl()
@@ -141,11 +214,13 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
                     return f.read(), filename or os.path.basename(out)
             return out.encode("utf-8"), filename or "model.stl"
 
-    # 9) trimesh (Trimesh / Scene)
+    # ---------------------------
+    # trimesh directo
+    # ---------------------------
     try:
-        import trimesh
+        import trimesh  # type: ignore
         if isinstance(result, (trimesh.Trimesh, trimesh.Scene)):
-            data = result.export(file_type="stl")  # devuelve bytes
+            data = result.export(file_type="stl")
             if isinstance(data, (bytes, bytearray)):
                 return bytes(data), filename
             if isinstance(data, str):
@@ -153,19 +228,19 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     except Exception:
         pass
 
-    # 10) cadquery (Workplane / toStlString / exporters.export)
+    # ---------------------------
+    # cadquery
+    # ---------------------------
     try:
         import cadquery as cq  # type: ignore
         from cadquery import exporters  # type: ignore
 
         if isinstance(result, cq.Workplane) or hasattr(result, "toStlString"):
-            # a) toStlString
             tss = getattr(result, "toStlString", None)
             if callable(tss):
                 s = tss()
                 if isinstance(s, str):
                     return s.encode("utf-8"), filename or "model.stl"
-            # b) exporters.export a ruta temporal
             try:
                 data = _export_via_tempfile(lambda p: exporters.export(result, p))
                 return data, filename
@@ -174,7 +249,9 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     except Exception:
         pass
 
-    # 11) .save(path) → usar temporal
+    # ---------------------------
+    # save(path)
+    # ---------------------------
     save = getattr(result, "save", None)
     if callable(save):
         try:
