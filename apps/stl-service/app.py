@@ -53,35 +53,6 @@ def _export_via_tempfile(callable_with_path, suffix: str = ".stl") -> bytes:
 
 
 # ---------------------------------------------------------------------
-# Fallback: placeholder si un builder devuelve lista vacía
-# ---------------------------------------------------------------------
-def _placeholder_box_mm(length_mm: float, width_mm: float, height_mm: float) -> bytes:
-    """
-    Genera una cajita STL con las dimensiones indicadas en mm
-    para evitar 500 cuando un builder devuelve [].
-    """
-    try:
-        import trimesh  # type: ignore
-        from trimesh.creation import box  # type: ignore
-
-        # Trimesh usa unidades arbitrarias, mantenemos mm.
-        mesh = box(extents=[max(length_mm, 1e-3), max(width_mm, 1e-3), max(height_mm, 1e-3)])
-        data = mesh.export(file_type="stl")
-        if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
-        if isinstance(data, str):
-            return data.encode("utf-8")
-    except Exception as e:
-        # Último backup: STL ASCII mínimo de un tetra (poco probable llegar aquí)
-        ascii_stl = f"""solid placeholder
-endsolid placeholder
-"""
-        return ascii_stl.encode("utf-8")
-    # debería haber retornado antes
-    raise HTTPException(status_code=500, detail="Failed to build placeholder STL")
-
-
-# ---------------------------------------------------------------------
 # Normalizador de salidas -> STL bytes
 # ---------------------------------------------------------------------
 def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
@@ -108,10 +79,9 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
             print(f"[forge] normalize:list/tuple len= {len(items)}")
 
         if len(items) == 0:
-            # lista vacía: no hay nada que convertir
             raise HTTPException(
-                status_code=500,
-                detail="Builder returned an empty list (no geometry)."
+                status_code=422,
+                detail="Builder returned an empty list (no geometry). Fix the model to return a mesh/scene."
             )
 
         # Caso (payload, "nombre.stl")
@@ -185,8 +155,8 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
 
         # Nada convertible
         raise HTTPException(
-            status_code=500,
-            detail="Builder must return bytes or BytesIO (got list with no convertible items)"
+            status_code=422,
+            detail="Builder returned a list but none of the items are convertible to STL."
         )
 
     # --- DICT ---
@@ -311,8 +281,8 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     methods = [m for m in dir(result) if not m.startswith("_")]
     preview = ", ".join(methods[:20])
     raise HTTPException(
-        status_code=500,
-        detail=f"Builder must return bytes or BytesIO (got {typename}; methods: {preview} …)"
+        status_code=422,
+        detail=f"Builder must return STL-convertible output (got {typename}; methods: {preview} …)"
     )
 
 
@@ -439,18 +409,16 @@ async def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Model build error: {e}")
 
-    # Fallback inmediato si el builder ha devuelto lista vacía
+    # Rechazo explícito si el builder devolvió lista vacía
     if isinstance(result_any, (list, tuple)) and len(result_any) == 0:
-        if os.getenv("DEBUG_FORGE"):
-            print("[forge] builder devolvió lista vacía → usando placeholder box")
-        stl_bytes = _placeholder_box_mm(
-            p["length_mm"], p["width_mm"], p["height_mm"]
+        raise HTTPException(
+            status_code=422,
+            detail=f"Model '{model_key}' returned an empty list. Ensure the builder returns a mesh/scene."
         )
-        filename = f"{model_key}.stl"
-    else:
-        # Normalización a STL bytes
-        stl_bytes, suggested_name = _as_stl_bytes(result_any)
-        filename = suggested_name or f"{model_key}.stl"
+
+    # Normalización a STL bytes
+    stl_bytes, suggested_name = _as_stl_bytes(result_any)
+    filename = suggested_name or f"{model_key}.stl"
 
     # Subida a Supabase
     up = upload_and_get_url(
