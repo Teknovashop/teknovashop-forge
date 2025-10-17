@@ -73,33 +73,32 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(result, (list, tuple)):
         items = list(result)
 
-        # Si viene (payload, "nombre.stl")
+        # Caso (payload, "nombre.stl")
         if len(items) == 2 and isinstance(items[1], str) and not isinstance(items[0], str):
             payload = items[0]
             filename = items[1] if items[1].lower().endswith(".stl") else items[1]
             data, fn = _as_stl_bytes(payload)
             return data, (filename or fn)
 
-        # Si hay strings *.stl incluidos, toma uno como nombre sugerido
+        # Si hay strings *.stl, úsalos como nombre sugerido
         for it in items:
             if isinstance(it, str) and it.lower().endswith(".stl"):
                 filename = it
                 break
 
-        # Si hay un único elemento no-str, normalízalo directamente
+        # Un único elemento no-string -> conviértelo
         non_str = [x for x in items if not isinstance(x, str)]
         if len(non_str) == 1:
             data, fn = _as_stl_bytes(non_str[0])
             return data, (filename or fn)
 
-        # Intento de combinación si son trimesh.* (Scene/Trimesh)
+        # Intento de combinación de geometrías con trimesh
         try:
             import trimesh  # type: ignore
             if all(isinstance(x, (trimesh.Trimesh, trimesh.Scene)) for x in non_str if x is not None):
                 scene = trimesh.Scene()
                 for x in non_str:
                     if isinstance(x, trimesh.Scene):
-                        # añadir todas las geometrias de la escena
                         for g in x.geometry.values():
                             scene.add_geometry(g)
                     elif isinstance(x, trimesh.Trimesh):
@@ -110,9 +109,9 @@ def _as_stl_bytes(result: Any) -> Tuple[bytes, Optional[str]]:
                 if isinstance(exported, str):
                     return exported.encode("utf-8"), (filename or "model.stl")
         except Exception:
-            pass  # si no está trimesh o falla, seguimos
+            pass
 
-        # Fallback: recorre buscando el primer elemento convertible
+        # Fallback: busca el primer elemento convertible
         for x in non_str:
             try:
                 data, fn = _as_stl_bytes(x)
