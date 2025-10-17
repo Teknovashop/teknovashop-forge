@@ -1,149 +1,138 @@
-# /supabase_client.py
+# apps/stl-service/supabase_client.py
+from __future__ import annotations
+
 import os
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
-try:
-    # supabase-py v2.x
-    from supabase import create_client, Client  # type: ignore
-except Exception:
-    create_client = None
-    Client = None  # type: ignore
+import httpx
 
 
-def _get_env(name: str) -> Optional[str]:
-    v = os.getenv(name)
-    if v is None:
-        return None
-    v = v.strip()
-    return v or None
+def _env(name: str, fallback: Optional[str] = None) -> Optional[str]:
+    """Lee variables con varios alias (Vercel/Render)"""
+    aliases = {
+        "SUPABASE_URL": [
+            "SUPABASE_URL",
+            "NEXT_PUBLIC_SUPABASE_URL",
+        ],
+        "SUPABASE_KEY": [
+            "SUPABASE_SERVICE_KEY",          # Render / Backend
+            "SUPABASE_SERVICE_ROLE_KEY",     # Vercel (típico)
+            "SUPABASE_SECRET_KEY",
+            "SUPABASE_KEY",                  # genérico
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY", # si el bucket es público, también sirve
+        ],
+        "SUPABASE_BUCKET": [
+            "SUPABASE_BUCKET",
+            "NEXT_PUBLIC_SUPABASE_BUCKET",
+        ],
+    }
+    for k in aliases.get(name, [name]):
+        v = os.getenv(k)
+        if v:
+            return v
+    return fallback
 
 
-def _get_supabase_creds() -> Dict[str, str]:
-    """
-    Recoge credenciales de Supabase aceptando múltiples nombres de variables.
-
-    URL:
-      - SUPABASE_URL
-      - NEXT_PUBLIC_SUPABASE_URL
-
-    KEY (preferimos service/role key si existe):
-      - SUPABASE_SERVICE_KEY
-      - SUPABASE_SERVICE_ROLE_KEY
-      - SUPABASE_KEY
-      - NEXT_PUBLIC_SUPABASE_ANON_KEY  (último recurso)
-
-    BUCKET:
-      - SUPABASE_BUCKET
-      - NEXT_PUBLIC_SUPABASE_BUCKET
-      - (fallback) "forge-stl"
-    """
-    url = (
-        _get_env("SUPABASE_URL")
-        or _get_env("NEXT_PUBLIC_SUPABASE_URL")
-    )
-    key = (
-        _get_env("SUPABASE_SERVICE_KEY")
-        or _get_env("SUPABASE_SERVICE_ROLE_KEY")
-        or _get_env("SUPABASE_KEY")
-        or _get_env("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-    )
-    bucket = (
-        _get_env("SUPABASE_BUCKET")
-        or _get_env("NEXT_PUBLIC_SUPABASE_BUCKET")
-        or "forge-stl"
-    )
-
-    if not url or not key:
-        missing = []
-        if not url:
-            missing.append("SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL")
-        if not key:
-            missing.append(
-                "SUPABASE_SERVICE_KEY/SUPABASE_SERVICE_ROLE_KEY/"
-                "SUPABASE_KEY/NEXT_PUBLIC_SUPABASE_ANON_KEY"
-            )
-        raise RuntimeError(f"Missing {' & '.join(missing)} environment variables")
-
-    # Normaliza URL (sin slash final para supabase-py)
-    url = url.rstrip("/")
-
-    return {"url": url, "key": key, "bucket": bucket}
+def _norm_base_url(url: str) -> str:
+    # Acepta con o sin barra final y devuelve SIEMPRE “…/”
+    url = (url or "").strip()
+    if not url:
+        return url
+    return url.rstrip("/") + "/"
 
 
-def _get_client() -> "Client":
-    if create_client is None:
-        raise RuntimeError(
-            "Supabase client library not available. "
-            "Ensure 'supabase==2.*' is in requirements.txt"
-        )
-    creds = _get_supabase_creds()
-    return create_client(creds["url"], creds["key"])
+def _storage_base(url: str) -> str:
+    # https://PROJECT.supabase.co/storage/v1/
+    base = _norm_base_url(url)
+    return base + "storage/v1/"
 
 
 def upload_and_get_url(
     data: bytes,
+    *,
     bucket: Optional[str] = None,
     folder: str = "stl",
     filename: str = "model.stl",
-) -> Dict[str, Any]:
+    create_signed_url: bool = False,
+    signed_ttl_seconds: int = 60 * 60,  # 1 hora
+) -> Dict[str, object]:
     """
-    Sube 'data' al bucket y devuelve { ok, path, url?, signed_url? }.
-    - Upsert habilitado (sobrescribe si existe).
-    - Genera un signed_url de 7 días.
+    Sube `data` a Supabase Storage y devuelve rutas/URLs.
+    No requiere SDK; usa HTTP directo para evitar problemas de dependencias.
+
+    Retorna:
+        {
+          "ok": True/False,
+          "path": "stl/abc123/model.stl",
+          "url": "https://.../storage/v1/object/public/<bucket>/stl/...",
+          "signed_url": "https://... (opcional si create_signed_url=True)",
+          "error": "... (si falla)"
+        }
     """
-    if not isinstance(data, (bytes, bytearray)):
-        return {"ok": False, "error": "Data must be bytes"}
+    supa_url = _env("SUPABASE_URL")
+    supa_key = _env("SUPABASE_KEY")
+    bucket = bucket or _env("SUPABASE_BUCKET") or "forge-stl"
 
-    creds = _get_supabase_creds()
-    client = _get_client()
-    bucket_name = bucket or creds["bucket"]
+    if not supa_url or not supa_key:
+        return {
+            "ok": False,
+            "error": "Missing SUPABASE_URL / SUPABASE_KEY environment variables",
+        }
 
-    # Asegura rutas limpias
-    folder = (folder or "").strip("/ ")
-    filename = filename.strip() or "model.stl"
-    path = f"{folder}/{filename}" if folder else filename
+    storage = _storage_base(supa_url)  # siempre termina en “/”
+    # RUTA INTERNA EN EL BUCKET
+    ts = int(time.time())
+    # subcarpeta por fecha o timestamp para evitar colisiones
+    path = f"{folder.rstrip('/')}/{ts}/{filename}"
 
-    # Subida
+    # Cabeceras: ¡TODO como str!
+    headers = {
+        "Authorization": f"Bearer {supa_key}",
+        "apikey": supa_key,
+        "Content-Type": "application/octet-stream",
+        # Si quisieras usar header en lugar de query param, debe ser string:
+        # "x-upsert": "true",
+    }
+
+    # PUT/POST: usamos POST con query params estándar
+    # POST /object/<bucket>/<path>?upsert=true
+    object_url = f"{storage}object/{bucket}/{path}"
+
     try:
-        # upsert=True para evitar errores si ya existe
-        client.storage.from_(bucket_name).upload(
-            path=path,
-            file=data,
-            file_options={"content-type": "model/stl", "upsert": True},
-        )
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                object_url,
+                params={"upsert": "true"},   # ¡string, no bool!
+                headers=headers,
+                content=data,
+            )
+        if resp.status_code not in (200, 201):
+            return {
+                "ok": False,
+                "error": f"Upload failed: {resp.status_code} {resp.text}",
+            }
     except Exception as e:
-        # Si el bucket no existe o hay otro problema, devuelve error limpio
         return {"ok": False, "error": f"Upload failed: {e}"}
 
-    # Intentamos obtener public_url (si el bucket es público) y un signed_url
-    public_url = None
-    signed_url = None
-    try:
-        public_url = client.storage.from_(bucket_name).get_public_url(path)
-        # Nota: en supabase-py v2, get_public_url devuelve dict o str según versión;
-        # normalizamos a str si es dict
-        if isinstance(public_url, dict):
-            public_url = public_url.get("publicUrl") or public_url.get("public_url")
-    except Exception:
-        public_url = None
+    # URL pública (si el bucket es público)
+    public_url = f"{storage}object/public/{bucket}/{path}"
 
-    try:
-        # 7 días
-        expires_in = 60 * 60 * 24 * 7
-        su = client.storage.from_(bucket_name).create_signed_url(path, expires_in)
-        if isinstance(su, dict):
-            signed_url = su.get("signedURL") or su.get("signed_url") or su.get("signedUrl")
-        else:
-            signed_url = su
-    except Exception:
-        signed_url = None
+    out: Dict[str, object] = {"ok": True, "path": path, "url": public_url}
 
-    return {
-        "ok": True,
-        "path": path,
-        "url": public_url,
-        "signed_url": signed_url,
-        "bucket": bucket_name,
-        "ts": int(time.time()),
-    }
+    if create_signed_url:
+        try:
+            # POST /object/sign/<bucket>/<path>
+            sign_url = f"{storage}object/sign/{bucket}/{path}"
+            payload = {"expiresIn": int(signed_ttl_seconds)}
+            with httpx.Client(timeout=15) as client:
+                r = client.post(sign_url, headers=headers, json=payload)
+            if r.status_code == 200 and isinstance(r.json(), dict):
+                signed = r.json().get("signedURL") or r.json().get("signedUrl")
+                if signed:
+                    out["signed_url"] = _norm_base_url(supa_url) + signed.lstrip("/")
+        except Exception:
+            # si falla la firma, devolvemos al menos la pública
+            pass
+
+    return out
