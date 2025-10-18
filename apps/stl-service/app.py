@@ -186,7 +186,6 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
             val = _get_param_from_aliases(params, name)
             # convierte numéricos
             if isinstance(val, (dict, list, tuple)) and name.lower() != "holes":
-                # si es un dict y no es holes, no forzamos
                 pass
             else:
                 vnum = _num(val)
@@ -198,10 +197,8 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
                 # defaults si no hay
                 if p.default is not inspect._empty:
                     continue
-                # algunos builders aceptan faltar R
                 if name in ("R", "r", "fillet", "fillet_mm", "round_mm"):
                     val = 0.0
-                # si sigue faltando y es posicional puro, lo dejamos fuera (TypeError lo capturará)
             kwargs[name] = val
         try:
             return fn(**kwargs)
@@ -224,7 +221,28 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "forge-stl", "origins": origins}
+    return {
+        "ok": True,
+        "service": "forge-stl",
+        "origins": origins,
+        "loaded_models": sorted(list(REGISTRY.keys())),
+        "aliases_count": len(ALIASES),
+    }
+
+@app.get("/debug/models")
+def debug_models():
+    """Lista modelos cargados y una muestra de alias para depuración."""
+    # muestra hasta 50 alias para no saturar
+    sample = {}
+    for i, (k, v) in enumerate(ALIASES.items()):
+        if i >= 50:
+            break
+        sample[k] = v
+    return {
+        "models": sorted(list(REGISTRY.keys())),
+        "aliases_count": len(ALIASES),
+        "sample_aliases": sample,
+    }
 
 @app.post("/generate")
 def generate(body: GenerateBody):
@@ -323,7 +341,14 @@ def cleanup_underscore(request: Request):
         page_size = 1000
         while True:
             # Nota: el SDK retorna lista de dicts con 'name'
-            listing = supabase.storage.from_(SUPABASE_BUCKET).list("", {"limit": page_size, "offset": page * page_size, "sortBy": {"column": "name", "order": "asc"}})
+            listing = supabase.storage.from_(SUPABASE_BUCKET).list(
+                "",
+                {
+                    "limit": page_size,
+                    "offset": page * page_size,
+                    "sortBy": {"column": "name", "order": "asc"},
+                },
+            )
             items = listing or []
             if not items:
                 break
