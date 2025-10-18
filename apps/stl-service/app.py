@@ -1,11 +1,9 @@
 # apps/stl-service/app.py
 import io
 import os
-import base64
-import tempfile
-from typing import Any, Dict, Iterable, Optional, Tuple, List
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -35,28 +33,24 @@ app.add_middleware(
 
 class TextOp(BaseModel):
     text: str
-    size: float = 6.0           # alto del texto (mm)
-    depth: float = 1.2          # espesor extrusión (mm)
-    mode: str = "engrave"       # "engrave" (resta) | "emboss" (suma)
-    pos: list[float] = Field(default_factory=lambda: [0, 0, 0])  # x,y,z (mm)
-    rot: list[float] = Field(default_factory=lambda: [0, 0, 0])  # rx,ry,rz (deg)
+    size: float = 6.0
+    depth: float = 1.2
+    mode: str = "engrave"        # "engrave" | "emboss"
+    pos: list[float] = Field(default_factory=lambda: [0, 0, 0])
+    rot: list[float] = Field(default_factory=lambda: [0, 0, 0])
     font: Optional[str] = None
 
 class GenerateBody(BaseModel):
-    slug: str
+    slug: str                     # <- requerido por tus builders
     params: Dict[str, Any] = Field(default_factory=dict)
     holes: Optional[Iterable[Dict[str, Any]]] = None
     text_ops: Optional[list[TextOp]] = None
+    # compat: algunos clientes podrían seguir enviando "model"
+    model: Optional[str] = None
 
 # -------------------------- Helpers --------------------------
 
 def _norm_slug(s: str) -> str:
-    """
-    Normaliza el slug para el registro:
-    - pasa a minúsculas
-    - convierte kebab->snake
-    - aplica ALIASES si procede
-    """
     if not s:
         return s
     raw = s.strip().lower()
@@ -64,40 +58,28 @@ def _norm_slug(s: str) -> str:
     return ALIASES.get(raw, ALIASES.get(snake, snake))
 
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
-    """
-    Normaliza cualquier salida del builder a un STL binario.
-    Acepta: bytes/bytearray, BytesIO/file-like, str (ruta o STL ASCII),
-    objetos con .export(file_obj, file_type="stl") (p.ej. trimesh meshes),
-    o dict/tuplas/listas con uno o varios items convertibles.
-    """
-    # bytes directos
+    # bytes/bytearray
     if isinstance(obj, (bytes, bytearray)):
         return (bytes(obj), None)
-
     # file-like
     if hasattr(obj, "read"):
         return (obj.read(), None)
-
-    # string: ruta o STL ASCII
+    # string: ruta o ASCII STL
     if isinstance(obj, str):
         if os.path.exists(obj):
             with open(obj, "rb") as f:
                 return (f.read(), os.path.basename(obj))
-        # ASCII STL en texto:
         if obj.strip().startswith("solid"):
             return (obj.encode("utf-8"), None)
-
-    # trimesh / objetos con .export
+    # trimesh u objeto con .export
     if hasattr(obj, "export"):
         buf = io.BytesIO()
         try:
             obj.export(buf, file_type="stl")
         except TypeError:
-            # algunas versiones requieren (file_obj=..., file_type=...)
             obj.export(file_obj=buf, file_type="stl")
         return (buf.getvalue(), None)
-
-    # colecciones: tomar el primero convertible (o concatenar en el futuro)
+    # colecciones: intenta el primero convertible
     if isinstance(obj, (list, tuple)):
         for it in obj:
             try:
@@ -105,10 +87,9 @@ def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
                 return (data, name)
             except Exception:
                 continue
-
     raise TypeError("Builder returned unsupported type for STL export")
 
-# -------------------------- Core Endpoint --------------------------
+# -------------------------- Endpoints --------------------------
 
 @app.get("/health")
 def health():
@@ -116,60 +97,51 @@ def health():
 
 @app.post("/generate")
 def generate(body: GenerateBody):
-    """
-    Entrada principal:
-      - slug: admite kebab o snake, y alias (p.ej. 'vesa-adapter' -> 'vesa_adapter').
-      - params: dict con dimensiones, fillet_mm, etc.
-      - text_ops: lista de operaciones de texto (engrave/emboss).
-    Devuelve: { ok, slug, path, url, signed_url }
-    """
-    slug = _norm_slug(body.slug)
-    if slug not in REGISTRY:
+    # slug normalizado (admite kebab/snake/alias)
+    slug = _norm_slug(body.slug or body.model or "")
+    if not slug or slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{slug}' not found")
 
     builder = REGISTRY[slug]
 
-    # fusiona params “limpios”
+    # params saneados + alias comuns
     params = dict(body.params or {})
-    # soporte suave a alias de nombres de parámetros comunes
-    for a, b in (("round_mm", "fillet_mm"),):
-        if a in params and b not in params:
-            params[b] = params[a]
+    if "round_mm" in params and "fillet_mm" not in params:
+        try:
+            params["fillet_mm"] = float(params["round_mm"])
+        except Exception:
+            pass
 
-    # las text_ops las pasamos como lista de dicts simples (para models.apply_text_ops)
-    text_ops = [op.dict() for op in (body.text_ops or [])]
-
-    # genera mesh/objeto exportable
+    # genera base
     try:
         result = builder(params)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # algunos builders ya devuelven mesh con texto aplicado; si no, intentamos aplicar
-    # vía función util en models (si existe)
-    from models import apply_text_ops as _try_apply_text  # opcional en tu repo
+    # aplicar texto si existe la utilidad en tu paquete 'models' (OPCIONAL)
+    _try_apply_text = None
     try:
-        if text_ops:
-            result = _try_apply_text(result, text_ops)
+        from models import apply_text_ops as _apply  # puede no existir
+        _try_apply_text = _apply
     except Exception:
-        # si no existe o falla, seguimos con la geometría base
-        pass
+        _try_apply_text = None
 
-    # serializa a STL binario
+    if _try_apply_text and body.text_ops:
+        try:
+            result = _try_apply_text(result, [op.dict() for op in body.text_ops])
+        except Exception:
+            # si falla el texto, seguimos con la geometría base
+            pass
+
+    # serializar STL
     stl_bytes, maybe_name = _as_stl_bytes(result)
-
-    # nombre destino en bucket
     filename = maybe_name or "forge-output.stl"
     key = f"{slug}/{filename}"
 
-    # sube a Supabase y devuelve urls
+    # subir y devolver URLs
     try:
         out = upload_and_get_url(stl_bytes, key=key)
-        # esperado: {"path": key, "url": public_url, "signed_url": signed}
-        return {
-            "ok": True,
-            "slug": slug,
-            **out,
-        }
+        # esperado del helper: {"path": key, "url": public_url, "signed_url": signed_url}
+        return {"ok": True, "slug": slug, **out}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
