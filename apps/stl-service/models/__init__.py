@@ -1,116 +1,70 @@
-# apps/stl-service/models/__init__.py
 """
-Carga de builders y tabla de alias para aceptar tanto kebab-case (UI)
-como snake_case (código antiguo). REGISTRY expone los builders por slug
-normalizado (snake) y ALIASES traduce cualquier variante a ese slug.
+Registro de builders y tabla de alias.
+- REGISTRY: builders indexados por slug snake_case
+- ALIASES:  cualquier variante (kebab/snake/etiquetas de la UI) -> slug snake_case
+Además: loggeamos por qué falla cada import para no “tragarnos” errores.
 """
 
 from typing import Callable, Dict
+import traceback
+import sys
 
 REGISTRY: Dict[str, Callable] = {}
 ALIASES: Dict[str, str] = {}
 
+def _alias(s: str) -> str:
+    return (s or "").strip().lower()
+
 def _reg(slug_snake: str, fn: Callable, *more_aliases: str):
-    # Guardamos por snake_case en el registro
+    """Registra el builder y todas sus variantes como alias."""
+    slug_snake = _alias(slug_snake).replace("-", "_")
     REGISTRY[slug_snake] = fn
-    # Alias obvios: snake y kebab en minúsculas
+
     kebab = slug_snake.replace("_", "-")
-    ALIASES[slug_snake] = slug_snake
-    ALIASES[kebab] = slug_snake
-    # Alias adicionales (tanto kebab como snake y variantes)
+    ALIASES[_alias(slug_snake)] = slug_snake
+    ALIASES[_alias(kebab)] = slug_snake
+
     for a in more_aliases:
-        a = a.strip()
+        a = _alias(a)
         if not a:
             continue
         ALIASES[a] = slug_snake
         ALIASES[a.replace("_", "-")] = slug_snake
         ALIASES[a.replace("-", "_")] = slug_snake
 
-# -------------------------
-# IMPORTA AQUÍ TUS BUILDERS
-# -------------------------
-# Nota: no estoy creando archivos nuevos; sólo referencio lo que ya tienes.
-# Si algún import no existe en tu repo, coméntalo o crea el alias correcto.
-try:
-    from .vesa_adapter import build as vesa_adapter
-    _reg("vesa_adapter", vesa_adapter, "vesa-adapter")
-except Exception:
-    pass
-
-try:
-    from .router_mount import build as router_mount
-    _reg("router_mount", router_mount, "router-mount", "soporte-de-router", "router-mount-pack")
-except Exception:
-    pass
-
-try:
-    from .cable_tray import build as cable_tray
-    _reg("cable_tray", cable_tray, "bandeja-de-cables", "cable-tray")
-except Exception:
-    pass
-
-try:
-    from .phone_dock import build as phone_dock
-    _reg("phone_dock", phone_dock, "dock-para-movil-usb-c", "phone-dock")
-except Exception:
-    pass
-
-try:
-    from .tablet_stand import build as tablet_stand
-    _reg("tablet_stand", tablet_stand, "soporte-de-tablet", "tablet-stand")
-except Exception:
-    pass
-
-try:
-    from .monitor_stand import build as monitor_stand
-    _reg("monitor_stand", monitor_stand, "elevador-de-monitor", "monitor-stand")
-except Exception:
-    pass
-
-try:
-    from .raspi_case import build as raspi_case
-    _reg("raspi_case", raspi_case, "caja-raspberry-pi", "raspi-case")
-except Exception:
-    pass
-
-try:
-    from .go_pro_mount import build as go_pro_mount
-    _reg("go_pro_mount", go_pro_mount, "soporte-gopro", "go-pro-mount", "gopro-mount")
-except Exception:
-    pass
-
-try:
-    from .mic_arm_clip import build as mic_arm_clip
-    _reg("mic_arm_clip", mic_arm_clip, "clip-brazo-mic", "mic-arm-clip")
-except Exception:
-    pass
-
-try:
-    from .ssd_holder import build as ssd_holder
-    _reg("ssd_holder", ssd_holder, "caddy-ssd-2-5-a-3-5", "ssd-holder")
-except Exception:
-    pass
-
-try:
-    from .camera_plate import build as camera_plate
-    _reg("camera_plate", camera_plate, "camera-plate")
-except Exception:
-    pass
-
-try:
-    from .wall_hook import build as wall_hook
-    _reg("wall_hook", wall_hook, "wall-hook", "gancho-pared")
-except Exception:
-    pass
-
-try:
-    from .wall_bracket import build as wall_bracket
-    _reg("wall_bracket", wall_bracket, "wall-bracket", "soporte-pared")
-except Exception:
-    pass
+def _safe_import(name: str, builder_name: str, slug_snake: str, *aliases: str):
+    """
+    Importa models.<name> y registra su .build como <slug_snake>.
+    Si falla, imprime el error a stderr para que se vea en Render.
+    """
+    try:
+        mod = __import__(f"models.{name}", fromlist=["build"])
+        fn = getattr(mod, builder_name, None) or getattr(mod, "build", None)
+        if not callable(fn):
+            raise RuntimeError(f"models.{name} no expone '{builder_name}' ni 'build'")
+        _reg(slug_snake, fn, *aliases)
+    except Exception:
+        print(f"[FORGE][models] ERROR importando models.{name} -> {slug_snake}", file=sys.stderr)
+        traceback.print_exc()
 
 # -------------------------
-# UTIL DE TEXTO (opcional)
+# REGISTROS (mantener en sync con tu UI)
 # -------------------------
-# Si tu repo define apply_text_ops en otra ruta, el app.py ya lo busca
-# en 3 ubicaciones; aquí no necesitamos re-exportarla.
+
+_safe_import("vesa_adapter",   "build", "vesa_adapter",   "vesa-adapter", "adaptador-vesa-75-100-a-100-200")
+_safe_import("router_mount",   "build", "router_mount",   "router-mount", "soporte-de-router")
+_safe_import("cable_tray",     "build", "cable_tray",     "cable-tray", "bandeja-de-cables")
+_safe_import("tablet_stand",   "build", "tablet_stand",   "tablet-stand", "soporte-de-tablet")
+_safe_import("monitor_stand",  "build", "monitor_stand",  "monitor-stand", "elevador-de-monitor")
+_safe_import("ssd_holder",     "build", "ssd_holder",     "ssd-holder", "caddy-ssd-2-5-a-3-5")
+_safe_import("raspi_case",     "build", "raspi_case",     "raspi-case", "caja-raspberry-pi")
+_safe_import("go_pro_mount",   "build", "go_pro_mount",   "go-pro-mount", "gopro-mount", "soporte-gopro")
+_safe_import("mic_arm_clip",   "build", "mic_arm_clip",   "mic-arm-clip", "clip-brazo-mic")
+_safe_import("camera_plate",   "build", "camera_plate",   "camera-plate", "placa-para-camara")
+_safe_import("wall_hook",      "build", "wall_hook",      "wall-hook", "gancho-pared")
+_safe_import("wall_bracket",   "build", "wall_bracket",   "wall-bracket", "soporte-pared")
+_safe_import("phone_dock",     "build", "phone_dock",     "phone-dock", "dock-para-movil-usb-c")
+_safe_import("hub_holder",     "build", "hub_holder",     "hub-holder")
+
+# Nota: si en tu repo hay más modelos, añádelos aquí con _safe_import.
+# Este archivo NO silencía errores: verás en logs si algo no carga.
