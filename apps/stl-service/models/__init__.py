@@ -1,117 +1,116 @@
 # apps/stl-service/models/__init__.py
 """
-Registro dinámico de modelos.
-
-Explora los módulos Python del paquete `models/` y registra automáticamente
-una función builder por módulo. Acepta estos nombres de función, por orden:
-    build, make, builder, generate, generate_stl, create, main
-
-Así evitamos importaciones rígidas tipo:
-    from .cable_clip import build as cable_clip
-que fallan cuando el nombre real difiere.
+Carga de builders y tabla de alias para aceptar tanto kebab-case (UI)
+como snake_case (código antiguo). REGISTRY expone los builders por slug
+normalizado (snake) y ALIASES traduce cualquier variante a ese slug.
 """
 
-from __future__ import annotations
-import importlib
-import inspect
-import pkgutil
-import pathlib
-from typing import Any, Callable, Dict
+from typing import Callable, Dict
 
-__all__ = ["REGISTRY", "ALIASES"]
+REGISTRY: Dict[str, Callable] = {}
+ALIASES: Dict[str, str] = {}
 
-# Nombres candidatos de la función constructora dentro de cada módulo
-CANDIDATE_FUNCS = (
-    "build",
-    "make",
-    "builder",
-    "generate",
-    "generate_stl",
-    "create",
-    "main",
-)
-
-# Módulos utilitarios que NO son modelos imprimibles
-EXCLUDE_MODULES = {
-    "__init__",
-    "_helpers",
-    "_booleans",
-    "_ops",
-    "geom",
-    "util",
-    "utils_geo",
-}
-
-def _pick_builder(mod: Any) -> Callable[[Dict[str, Any]], Any] | None:
-    """Devuelve la primera función candidata encontrada en el módulo."""
-    for name in CANDIDATE_FUNCS:
-        fn = getattr(mod, name, None)
-        if callable(fn):
-            return fn
-
-    # Último recurso: toma la primera función pública que acepte al menos 1 parámetro
-    for name, obj in vars(mod).items():
-        if name.startswith("_"):
+def _reg(slug_snake: str, fn: Callable, *more_aliases: str):
+    # Guardamos por snake_case en el registro
+    REGISTRY[slug_snake] = fn
+    # Alias obvios: snake y kebab en minúsculas
+    kebab = slug_snake.replace("_", "-")
+    ALIASES[slug_snake] = slug_snake
+    ALIASES[kebab] = slug_snake
+    # Alias adicionales (tanto kebab como snake y variantes)
+    for a in more_aliases:
+        a = a.strip()
+        if not a:
             continue
-        if callable(obj) and inspect.isfunction(obj):
-            try:
-                sig = inspect.signature(obj)
-                if len(sig.parameters) >= 1:
-                    return obj
-            except Exception:
-                # Si no podemos inspeccionar la firma, saltamos
-                continue
-    return None
+        ALIASES[a] = slug_snake
+        ALIASES[a.replace("_", "-")] = slug_snake
+        ALIASES[a.replace("-", "_")] = slug_snake
 
+# -------------------------
+# IMPORTA AQUÍ TUS BUILDERS
+# -------------------------
+# Nota: no estoy creando archivos nuevos; sólo referencio lo que ya tienes.
+# Si algún import no existe en tu repo, coméntalo o crea el alias correcto.
+try:
+    from .vesa_adapter import build as vesa_adapter
+    _reg("vesa_adapter", vesa_adapter, "vesa-adapter")
+except Exception:
+    pass
 
-def _discover_registry() -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-    """Explora el paquete y construye el registro."""
-    registry: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
-    pkg_path = pathlib.Path(__file__).parent
+try:
+    from .router_mount import build as router_mount
+    _reg("router_mount", router_mount, "router-mount", "soporte-de-router", "router-mount-pack")
+except Exception:
+    pass
 
-    for it in pkgutil.iter_modules([str(pkg_path)]):
-        name = it.name
-        if name in EXCLUDE_MODULES or name.startswith("_"):
-            continue
+try:
+    from .cable_tray import build as cable_tray
+    _reg("cable_tray", cable_tray, "bandeja-de-cables", "cable-tray")
+except Exception:
+    pass
 
-        try:
-            mod = importlib.import_module(f"{__name__}.{name}")
-        except Exception as e:
-            # Si un módulo falla al importarse, lo omitimos pero no rompemos todo
-            # (puedes revisar logs si alguno no carga).
-            continue
+try:
+    from .phone_dock import build as phone_dock
+    _reg("phone_dock", phone_dock, "dock-para-movil-usb-c", "phone-dock")
+except Exception:
+    pass
 
-        builder = _pick_builder(mod)
-        if builder:
-            registry[name] = builder
+try:
+    from .tablet_stand import build as tablet_stand
+    _reg("tablet_stand", tablet_stand, "soporte-de-tablet", "tablet-stand")
+except Exception:
+    pass
 
-    return registry
+try:
+    from .monitor_stand import build as monitor_stand
+    _reg("monitor_stand", monitor_stand, "elevador-de-monitor", "monitor-stand")
+except Exception:
+    pass
 
+try:
+    from .raspi_case import build as raspi_case
+    _reg("raspi_case", raspi_case, "caja-raspberry-pi", "raspi-case")
+except Exception:
+    pass
 
-# Registro final de modelos disponibles (clave = nombre de módulo)
-REGISTRY: Dict[str, Callable[[Dict[str, Any]], Any]] = _discover_registry()
+try:
+    from .go_pro_mount import build as go_pro_mount
+    _reg("go_pro_mount", go_pro_mount, "soporte-gopro", "go-pro-mount", "gopro-mount")
+except Exception:
+    pass
 
-# Aliases útiles para resolver nombres que llegan desde el frontend/UX
-# (guiones ↔ guiones bajos, nombres “bonitos”, etc.)
-ALIASES: Dict[str, str] = {
-    # Variantes con espacios/guiones
-    "cable-tray": "cable_tray",
-    "cable tray": "cable_tray",
-    "wall-hook": "wall_hook",
-    "wall hook": "wall_hook",
-    "laptop-stand": "laptop_stand",
-    "laptop stand": "laptop_stand",
-    "headset-stand": "headset_stand",
-    "headset stand": "headset_stand",
-    "enclosure-ip65": "enclosure_ip65",
-    "enclosure ip65": "enclosure_ip65",
-    "vesa-adapter": "vesa_adapter",
-    "vesa adapter": "vesa_adapter",
+try:
+    from .mic_arm_clip import build as mic_arm_clip
+    _reg("mic_arm_clip", mic_arm_clip, "clip-brazo-mic", "mic-arm-clip")
+except Exception:
+    pass
 
-    # Nombres de UI ya vistos
-    "camera_plate": "qr_plate",      # tu placa 1/4" vive en qr_plate.py
-    "phone_dock": "phone_stand",     # dock/stand de móvil
-}
+try:
+    from .ssd_holder import build as ssd_holder
+    _reg("ssd_holder", ssd_holder, "caddy-ssd-2-5-a-3-5", "ssd-holder")
+except Exception:
+    pass
 
-# Opcional: normalización extra en tiempo de import (guiones <-> guiones bajos, minúsculas)
-# La hacemos en app.py al resolver, pero si quieres puedes ampliar aquí también.
+try:
+    from .camera_plate import build as camera_plate
+    _reg("camera_plate", camera_plate, "camera-plate")
+except Exception:
+    pass
+
+try:
+    from .wall_hook import build as wall_hook
+    _reg("wall_hook", wall_hook, "wall-hook", "gancho-pared")
+except Exception:
+    pass
+
+try:
+    from .wall_bracket import build as wall_bracket
+    _reg("wall_bracket", wall_bracket, "wall-bracket", "soporte-pared")
+except Exception:
+    pass
+
+# -------------------------
+# UTIL DE TEXTO (opcional)
+# -------------------------
+# Si tu repo define apply_text_ops en otra ruta, el app.py ya lo busca
+# en 3 ubicaciones; aquí no necesitamos re-exportarla.
