@@ -1,6 +1,7 @@
 # apps/stl-service/app.py
 import io
 import os
+import inspect
 from typing import Any, Dict, Iterable, Optional, Tuple, List
 
 from fastapi import FastAPI, HTTPException, Request
@@ -107,6 +108,118 @@ def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
                 continue
     raise TypeError("Builder returned unsupported type for STL export")
 
+def _num(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    try:
+        return float(str(x).replace(",", "."))
+    except Exception:
+        return None
+
+def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
+    """
+    Convierte [{x,y,diam_mm}] en [(x,y,diam)] descartando entradas inválidas.
+    """
+    out: List[tuple] = []
+    if not holes:
+        return out
+    for h in holes:
+        if not isinstance(h, dict):
+            continue
+        x = _num(h.get("x"))
+        y = _num(h.get("y"))
+        d = _num(h.get("diam_mm") or h.get("diameter") or h.get("d"))
+        if x is None or y is None or d is None or d <= 0:
+            continue
+        out.append((x, y, d))
+    return out
+
+_ALIAS_KEYS: Dict[str, List[str]] = {
+    "L": ["length_mm", "length", "l"],
+    "W": ["width_mm", "width", "w"],
+    "H": ["height_mm", "height", "h"],
+    "T": ["thickness_mm", "thickness", "t"],
+    "R": ["fillet_mm", "fillet", "round_mm", "r"],
+    "holes": ["holes"],
+    "text": ["text", "label", "text_ops"],
+}
+
+def _get_param_from_aliases(params: Dict[str, Any], name: str) -> Any:
+    # intenta exacto
+    if name in params:
+        return params[name]
+    nlow = name.lower()
+    if nlow in params:
+        return params[nlow]
+    nup = name.upper()
+    if nup in params:
+        return params[nup]
+    # intenta alias conocidos
+    for alias in _ALIAS_KEYS.get(name, []):
+        if alias in params:
+            return params[alias]
+    for alias in _ALIAS_KEYS.get(nlow, []):
+        if alias in params:
+            return params[alias]
+    for alias in _ALIAS_KEYS.get(nup, []):
+        if alias in params:
+            return params[alias]
+    return None
+
+def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
+    """
+    Llama a un builder que NO acepta un dict; hace mapping por nombre/posición.
+    Soporta funciones tipo plate_with_holes(L,W,H,T,R,holes=...).
+    """
+    sig = None
+    try:
+        sig = inspect.signature(fn)
+    except Exception:
+        sig = None
+
+    # Construye kwargs a partir de la signatura
+    if sig:
+        kwargs: Dict[str, Any] = {}
+        for name, p in sig.parameters.items():
+            val = _get_param_from_aliases(params, name)
+            # convierte numéricos
+            if isinstance(val, (dict, list, tuple)) and name.lower() != "holes":
+                # si es un dict y no es holes, no forzamos
+                pass
+            else:
+                vnum = _num(val)
+                if vnum is not None:
+                    val = vnum
+            if name.lower() == "holes":
+                val = params.get("holes", [])
+            if val is None:
+                # defaults si no hay
+                if p.default is not inspect._empty:
+                    continue
+                # algunos builders aceptan faltar R
+                if name in ("R", "r", "fillet", "fillet_mm", "round_mm"):
+                    val = 0.0
+                # si sigue faltando y es posicional puro, lo dejamos fuera (TypeError lo capturará)
+            kwargs[name] = val
+        try:
+            return fn(**kwargs)
+        except TypeError:
+            # prueba con orden clásico L,W,H,T,R,...
+            order = ["L", "W", "H", "T", "R"]
+            args: List[Any] = []
+            for k in order:
+                v = _get_param_from_aliases(params, k)
+                vnum = _num(v)
+                args.append(vnum if vnum is not None else v)
+            try:
+                return fn(*args)
+            except Exception as e:
+                raise e
+    # Último intento directo
+    return fn(params)
+
 # -------------------------- Endpoints --------------------------
 
 @app.get("/health")
@@ -129,17 +242,23 @@ def generate(body: GenerateBody):
 
     builder = REGISTRY[builder_slug]
 
-    # 2) Params saneados + alias round->fillet
+    # 2) Params saneados + alias round->fillet + holes normalizados
     params = dict(body.params or {})
     if "round_mm" in params and "fillet_mm" not in params:
         try:
             params["fillet_mm"] = float(params["round_mm"])
         except Exception:
             pass
+    params["holes"] = _normalize_holes(body.holes)
 
-    # 3) Geometría base
+    # 3) Geometría base (dict o firma posicional)
     try:
         result = builder(params)
+    except TypeError:
+        try:
+            result = _call_builder_compat(builder, params)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Model build error: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
