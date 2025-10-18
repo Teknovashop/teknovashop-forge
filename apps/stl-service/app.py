@@ -143,14 +143,25 @@ def generate(body: GenerateBody):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # 4) Texto opcional (import opcional, no rompe si no existe)
+    # 4) Texto opcional: intenta 3 ubicaciones conocidas, sin romper si no están
+    _applier = None
     try:
-        from models import apply_text_ops as _apply_text_ops
-        if body.text_ops:
-            result = _apply_text_ops(result, [op.dict() for op in body.text_ops])
+        from models import apply_text_ops as _applier  # opción 1
     except Exception:
-        # si no existe o falla el texto, seguimos con la base
-        pass
+        try:
+            from models.text import apply_text_ops as _applier  # opción 2
+        except Exception:
+            try:
+                from models.text_ops import apply_text_ops as _applier  # opción 3
+            except Exception:
+                _applier = None
+
+    if _applier and body.text_ops:
+        try:
+            result = _applier(result, [op.dict() for op in body.text_ops])
+        except Exception:
+            # si falla el texto, seguimos con la geometría base
+            pass
 
     # 5) Serializar STL
     stl_bytes, maybe_name = _as_stl_bytes(result)
