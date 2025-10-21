@@ -2,58 +2,97 @@
 """
 Autodiscovery de builders de FORGE.
 
-Detecta y registra automáticamente funciones constructoras en los módulos
-del paquete `models/`. Reglas:
-- Para cada módulo `models/<nombre>.py`:
-    • si expone `build` / `make` / `generate`, se registra con clave snake `<nombre>`.
-    • si define `SLUGS = ["tablet-stand", ...]` se crean alias extra.
-    • si define `BUILDER = <func>` se usa ese callable explícito.
+Para cada módulo `models/<nombre>.py` se intentará registrar un builder con
+las siguientes reglas (en orden):
 
-- Se generan alias kebab <-> snake automáticamente (ej.: `tablet-stand` -> `tablet_stand`).
-- Se permiten alias “humanos” frecuentes.
+1) Si define `BUILDER: Callable`, se usa.
+2) Si define `BUILD: dict`, se intenta `BUILD["make"]` o `BUILD["build"]`.
+3) Si expone una función `build` / `make` / `make_model` / `generate`, se usa.
+4) Se crean alias snake <-> kebab automáticamente.
+5) Si el módulo define `NAME: str` y/o `SLUGS: list[str]`, se añaden como alias.
+
+Además se añaden alias “humanos” frecuentes al final.
 """
 
 from __future__ import annotations
+from typing import Callable, Dict, Iterable
 import importlib
 import pkgutil
-from typing import Callable, Dict, Iterable
+
+# --------------------- Registro y alias globales ---------------------
 
 REGISTRY: Dict[str, Callable] = {}
 ALIASES: Dict[str, str] = {}
 
 def _register(name_snake: str, fn: Callable) -> None:
+    """Registra el callable y crea alias básicos snake/kebab."""
     key = name_snake.lower()
     REGISTRY[key] = fn
-    # alias kebab
+    # Alias identidad y kebab
+    ALIASES.setdefault(key, key)
     ALIASES.setdefault(key.replace("_", "-"), key)
 
-# 1) Explora módulos de primer nivel en `models/`
+def _add_alias(raw_slug: str, target_snake: str) -> None:
+    """Añade alias sin pisar entradas existentes."""
+    if not raw_slug or not target_snake:
+        return
+    raw = raw_slug.strip().lower()
+    snake = target_snake.strip().lower()
+    kebab = snake.replace("_", "-")
+    ALIASES.setdefault(raw, snake)
+    # también su forma kebab por si llega en snake
+    if "_" in raw:
+        ALIASES.setdefault(raw.replace("_", "-"), snake)
+    else:
+        ALIASES.setdefault(raw.replace("-", "_"), snake)
+    # asegúrate de que kebab->snake está
+    ALIASES.setdefault(kebab, snake)
+
+# --------------------- Descubrimiento de módulos ---------------------
+
+# Explora módulos de primer nivel en `models/`
 for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
-    if _ispkg:
+    if _ispkg or _name in {"__init__", "text", "text_ops", "common"}:
         continue
-    if _name in {"__init__", "text", "text_ops", "common"}:
-        continue
+
     try:
         mod = importlib.import_module(f"{__name__}.{_name}")
     except Exception:
+        # si un módulo falla al importar, seguimos con el resto
         continue
 
-    # Elige el builder
+    # 1) Elige el builder por prioridad
     fn = getattr(mod, "BUILDER", None)
     if not callable(fn):
-        fn = getattr(mod, "build", None) or getattr(mod, "make", None) or getattr(mod, "generate", None)
+        build_dict = getattr(mod, "BUILD", None)
+        if isinstance(build_dict, dict):
+            cand = build_dict.get("make") or build_dict.get("build")
+            if callable(cand):
+                fn = cand
+    if not callable(fn):
+        for attr in ("build", "make", "make_model", "generate"):
+            f = getattr(mod, attr, None)
+            if callable(f):
+                fn = f
+                break
+
     if callable(fn):
         _register(_name, fn)
 
-    # Alias declarados por el módulo
+    # 2) Alias declarados por el módulo
+    #    - NAME: str  -> alias directo
+    #    - SLUGS: list -> múltiples alias
+    name_alias = getattr(mod, "NAME", None)
+    if isinstance(name_alias, str) and name_alias.strip():
+        _add_alias(name_alias, _name)
+
     slugs: Iterable[str] = getattr(mod, "SLUGS", []) or []
     for s in slugs:
-        raw = str(s).strip().lower()
-        snake = raw.replace("-", "_")
-        ALIASES.setdefault(raw, snake)
-        ALIASES.setdefault(snake.replace("_", "-"), snake)
+        if isinstance(s, str) and s.strip():
+            _add_alias(s, _name)
 
-# 2) Alias “humanos” adicionales, sin pisar existentes
+# --------------------- Alias “humanos” adicionales -------------------
+
 _extra = {
     "vesa-adapter": "vesa_adapter",
     "router-mount": "router_mount",
@@ -71,11 +110,20 @@ _extra = {
     "phone-dock": "phone_dock",
     "hub-holder": "hub_holder",
     "cable-clip": "cable_clip",
+    # por si llegan en snake ya “humanos”
+    "tablet_stand": "tablet_stand",
+    "monitor_stand": "monitor_stand",
+    "phone_dock": "phone_dock",
+    "camera_plate": "camera_plate",
+    "hub_holder": "hub_holder",
+    "go_pro_mount": "go_pro_mount",
+    "mic_arm_clip": "mic_arm_clip",
 }
 for k, v in _extra.items():
-    ALIASES.setdefault(k, v)
+    _add_alias(k, v)
 
-# 3) Reexporta apply_text_ops si existe
+# --------------------- Utilidad opcional de texto --------------------
+
 apply_text_ops = None  # type: ignore
 for candidate in ("text", "text_ops"):
     try:
@@ -85,3 +133,18 @@ for candidate in ("text", "text_ops"):
             break
     except Exception:
         pass
+
+# --------------------- API de ayuda (opcional) -----------------------
+
+def get_builder(slug_or_name: str) -> Callable | None:
+    """
+    Resuelve un slug en snake usando ALIASES y devuelve el callable
+    registrado si existe (o None).
+    """
+    if not slug_or_name:
+        return None
+    raw = slug_or_name.strip().lower()
+    snake = ALIASES.get(raw, ALIASES.get(raw.replace("-", "_"), raw.replace("-", "_")))
+    return REGISTRY.get(snake)
+
+__all__ = ["REGISTRY", "ALIASES", "get_builder", "apply_text_ops"]
