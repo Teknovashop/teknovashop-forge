@@ -7,12 +7,10 @@ from typing import Any, Dict, Optional
 
 from supabase import create_client
 try:
-    # Algunas versiones exponen Client aquí
     from supabase.lib.client import Client  # type: ignore
-except Exception:  # compatibilidad
+except Exception:
     Client = Any  # type: ignore
 
-# ---------------- Config ----------------
 SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
@@ -21,19 +19,15 @@ _client: Optional[Client] = None
 
 
 def _ensure_storage_trailing_slash(sb: Client) -> None:
-    """
-    Algunas builds del SDK esperan que el storage endpoint termine en '/'.
-    Forzamos el trailing slash sin fallar si el atributo no existe.
-    """
     try:
         if hasattr(sb.storage, "url"):
-            url = getattr(sb.storage, "url")
-            if isinstance(url, str) and not url.endswith("/"):
-                setattr(sb.storage, "url", url + "/")
+            u = getattr(sb.storage, "url")
+            if isinstance(u, str) and not u.endswith("/"):
+                setattr(sb.storage, "url", u + "/")
         if hasattr(sb.storage, "storage_url"):
-            s_url = getattr(sb.storage, "storage_url")
-            if isinstance(s_url, str) and not s_url.endswith("/"):
-                setattr(sb.storage, "storage_url", s_url + "/")
+            su = getattr(sb.storage, "storage_url")
+            if isinstance(su, str) and not su.endswith("/"):
+                setattr(sb.storage, "storage_url", su + "/")
     except Exception:
         pass
 
@@ -57,12 +51,6 @@ def upload_and_get_url(
     cache_control: str = "public, max-age=31536000, immutable",
     expires_in: int = 3600,
 ) -> Dict[str, Optional[str]]:
-    """
-    Sube el STL y devuelve { path, signed_url }.
-    - Evita usar 'upsert' (que dispara el error de la cabecera booleana).
-    - Si el objeto ya existe, se elimina antes (equivalente a upsert).
-    - 'object_path' debe ser relativo al bucket, p.ej. 'vesa-adapter/forge-output.stl'
-    """
     path = (object_path or "").lstrip("/")
     if not path or "/" not in path:
         raise ValueError("object_path must be '<slug>/forge-output.stl'")
@@ -70,32 +58,23 @@ def upload_and_get_url(
     cli = _get()
     store = cli.storage.from_(SUPABASE_BUCKET)
 
-    # 1) Borrar si existe (emula upsert)
+    # Emula upsert sin enviar cabecera booleana x-upsert
     try:
         store.remove([path])
     except Exception:
-        # Si no existe, ignoramos
         pass
 
-    # 2) Subir sin 'upsert'
-    #   El SDK acepta varias claves; cubrimos ambas para compat:
-    #   - "content-type" / "contentType"
-    #   - "cache-control" / "cacheControl"
-    file_opts = {
+    opts = {
         "content-type": content_type,
         "contentType": content_type,
         "cache-control": cache_control,
         "cacheControl": cache_control,
-        # NO poner 'upsert': True  <- causa la cabecera booleana y el 500
     }
-
     payload = data.getvalue() if hasattr(data, "getvalue") else bytes(data)  # type: ignore
-    store.upload(path, payload, file_opts)
+    store.upload(path, payload, opts)
 
-    # 3) Firmar URL
     signed = store.create_signed_url(path, expires_in)
     signed_url = None
     if isinstance(signed, dict):
         signed_url = signed.get("signedURL") or signed.get("signed_url")
-
     return {"path": path, "signed_url": signed_url}
