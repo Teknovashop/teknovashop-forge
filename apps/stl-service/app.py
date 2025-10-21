@@ -2,6 +2,9 @@
 import io
 import os
 import inspect
+import importlib
+import sys
+import traceback
 from typing import Any, Dict, Iterable, Optional, Tuple, List
 
 from fastapi import FastAPI, HTTPException, Request
@@ -217,6 +220,47 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
     # Último intento directo
     return fn(params)
 
+# ------------ Fallback: autocargar builder si no está en REGISTRY ------------
+
+def _lazy_load_builder(slug_snake: str) -> None:
+    """
+    Intenta importar models.<slug_snake> y localizar un builder válido:
+    - funciones: 'build' | 'make' | 'make_model'
+    - dict BUILD: ['make'] o ['build']
+    Si encuentra callable, lo registra en REGISTRY y añade alias básicos a ALIASES.
+    """
+    if not slug_snake:
+        return
+    if slug_snake in REGISTRY:
+        return
+    try:
+        mod = importlib.import_module(f"models.{slug_snake}")
+        cand = None
+        # funciones directas
+        for name in ("build", "make", "make_model"):
+            f = getattr(mod, name, None)
+            if callable(f):
+                cand = f
+                break
+        # diccionario BUILD
+        if cand is None and isinstance(getattr(mod, "BUILD", None), dict):
+            for key in ("make", "build"):
+                f = mod.BUILD.get(key)
+                if callable(f):
+                    cand = f
+                    break
+        if not callable(cand):
+            raise RuntimeError(f"models.{slug_snake} no expone builder válido")
+
+        # registra
+        REGISTRY[slug_snake] = cand
+        # alias mínimos locales (no sustituye a los globales)
+        ALIASES.setdefault(slug_snake.replace("_", "-"), slug_snake)
+        ALIASES.setdefault(slug_snake, slug_snake)
+    except Exception:
+        print(f"[FORGE][lazy] ERROR autocargando builder '{slug_snake}'", file=sys.stderr)
+        traceback.print_exc()
+
 # -------------------------- Endpoints --------------------------
 
 @app.get("/health")
@@ -254,10 +298,16 @@ def generate(body: GenerateBody):
     """
     # 1) Slug para builder y para storage
     builder_slug = _norm_slug_for_builder(body.slug or body.model or "")
+
+    # --------- LÍNEAS CLAVE: fallback de autocarga si no está en REGISTRY ---------
+    if builder_slug and builder_slug not in REGISTRY:
+        _lazy_load_builder(builder_slug)
+    # ------------------------------------------------------------------------------
+
     if not builder_slug or builder_slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{builder_slug}' not found")
-    storage_slug = _slug_for_storage(builder_slug)
 
+    storage_slug = _slug_for_storage(builder_slug)
     builder = REGISTRY[builder_slug]
 
     # 2) Params saneados + alias round->fillet + holes normalizados
@@ -340,7 +390,6 @@ def cleanup_underscore(request: Request):
         page = 0
         page_size = 1000
         while True:
-            # Nota: el SDK retorna lista de dicts con 'name'
             listing = supabase.storage.from_(SUPABASE_BUCKET).list(
                 "",
                 {
@@ -355,8 +404,7 @@ def cleanup_underscore(request: Request):
             to_remove: List[str] = []
             for it in items:
                 name = it.get("name") or ""
-                # Primer segmento (carpeta)
-                top = name.split("/", 1)[0]
+                top = name.split("/", 1)[0]  # Primer segmento (carpeta)
                 if "_" in top:
                     to_remove.append(name)
             if to_remove:
