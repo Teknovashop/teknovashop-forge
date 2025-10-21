@@ -117,9 +117,9 @@ def _num(x: Any) -> Optional[float]:
     if isinstance(x, (int, float)):
         return float(x)
     try:
-        return float(str(x).replace(",", "."))
+      return float(str(x).replace(",", "."))
     except Exception:
-        return None
+      return None
 
 def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
     """
@@ -133,7 +133,8 @@ def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
             continue
         x = _num(h.get("x"))
         y = _num(h.get("y"))
-        d = _num(h.get("diam_mm") or h.get("diameter") or h.get("d"))
+        # 👇 Añadido: diameter_mm (además de diam_mm/diameter/d)
+        d = _num(h.get("diam_mm") or h.get("diameter_mm") or h.get("diameter") or h.get("d"))
         if x is None or y is None or d is None or d <= 0:
             continue
         out.append((x, y, d))
@@ -150,7 +151,6 @@ _ALIAS_KEYS: Dict[str, List[str]] = {
 }
 
 def _get_param_from_aliases(params: Dict[str, Any], name: str) -> Any:
-    # intenta exacto
     if name in params:
         return params[name]
     nlow = name.lower()
@@ -159,7 +159,6 @@ def _get_param_from_aliases(params: Dict[str, Any], name: str) -> Any:
     nup = name.upper()
     if nup in params:
         return params[nup]
-    # intenta alias conocidos
     for alias in _ALIAS_KEYS.get(name, []):
         if alias in params:
             return params[alias]
@@ -182,12 +181,10 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
     except Exception:
         sig = None
 
-    # Construye kwargs a partir de la signatura
     if sig:
         kwargs: Dict[str, Any] = {}
         for name, p in sig.parameters.items():
             val = _get_param_from_aliases(params, name)
-            # convierte numéricos
             if isinstance(val, (dict, list, tuple)) and name.lower() != "holes":
                 pass
             else:
@@ -197,7 +194,6 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
             if name.lower() == "holes":
                 val = params.get("holes", [])
             if val is None:
-                # defaults si no hay
                 if p.default is not inspect._empty:
                     continue
                 if name in ("R", "r", "fillet", "fillet_mm", "round_mm"):
@@ -206,29 +202,18 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
         try:
             return fn(**kwargs)
         except TypeError:
-            # prueba con orden clásico L,W,H,T,R,...
             order = ["L", "W", "H", "T", "R"]
             args: List[Any] = []
             for k in order:
                 v = _get_param_from_aliases(params, k)
                 vnum = _num(v)
                 args.append(vnum if vnum is not None else v)
-            try:
-                return fn(*args)
-            except Exception as e:
-                raise e
-    # Último intento directo
+            return fn(*args)
     return fn(params)
 
 # ------------ Fallback: autocargar builder si no está en REGISTRY ------------
 
 def _lazy_load_builder(slug_snake: str) -> None:
-    """
-    Intenta importar models.<slug_snake> y localizar un builder válido:
-    - funciones: 'build' | 'make' | 'make_model'
-    - dict BUILD: ['make'] o ['build']
-    Si encuentra callable, lo registra en REGISTRY y añade alias básicos a ALIASES.
-    """
     if not slug_snake:
         return
     if slug_snake in REGISTRY:
@@ -236,13 +221,11 @@ def _lazy_load_builder(slug_snake: str) -> None:
     try:
         mod = importlib.import_module(f"models.{slug_snake}")
         cand = None
-        # funciones directas
         for name in ("build", "make", "make_model"):
             f = getattr(mod, name, None)
             if callable(f):
                 cand = f
                 break
-        # diccionario BUILD
         if cand is None and isinstance(getattr(mod, "BUILD", None), dict):
             for key in ("make", "build"):
                 f = mod.BUILD.get(key)
@@ -252,9 +235,7 @@ def _lazy_load_builder(slug_snake: str) -> None:
         if not callable(cand):
             raise RuntimeError(f"models.{slug_snake} no expone builder válido")
 
-        # registra
         REGISTRY[slug_snake] = cand
-        # alias mínimos locales (no sustituye a los globales)
         ALIASES.setdefault(slug_snake.replace("_", "-"), slug_snake)
         ALIASES.setdefault(slug_snake, slug_snake)
     except Exception:
@@ -264,19 +245,15 @@ def _lazy_load_builder(slug_snake: str) -> None:
 # ------------ Adaptadores de slugs del UI a builders reales ------------------
 
 def _val(params: Dict[str, Any], *keys: str, default: Optional[float] = None) -> Optional[float]:
-    """Primera coincidencia numérica entre varias claves."""
     for k in keys:
         v = _num(params.get(k))
         if v is not None:
             return v
     return default
 
-# Cada adaptador recibe los params “genéricos” del formulario y devuelve:
-#   (slug_builder_destino, params_adaptados_dict)
 ParamAdapter = Callable[[Dict[str, Any]], Tuple[str, Dict[str, Any]]]
 
 def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Usa el builder existente laptop_stand
     return (
         "laptop_stand",
         {
@@ -290,7 +267,6 @@ def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     )
 
 def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Risers simples → aprox con cable_tray (ancho, fondo, altura, pared)
     return (
         "cable_tray",
         {
@@ -302,7 +278,6 @@ def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     )
 
 def _adapt_phone_dock(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Mapea al builder phone_stand (base + ángulo + ranuras)
     return (
         "phone_stand",
         {
@@ -317,12 +292,9 @@ def _adapt_phone_dock(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     )
 
 ADAPTERS: Dict[str, ParamAdapter] = {
-    # slugs que te llegan desde el UI (ya en snake_case)
     "tablet_stand":  _adapt_tablet_stand,
     "monitor_stand": _adapt_monitor_stand,
     "phone_dock":    _adapt_phone_dock,
-    # Si más adelante añades 'camera_plate.py', quita el adaptador.
-    # Podríamos hacer un adaptador a 'qr_plate', pero no sería una placa de cámara real.
 }
 
 # -------------------------- Endpoints --------------------------
@@ -340,7 +312,6 @@ def health():
 
 @app.get("/debug/models")
 def debug_models():
-    """Lista modelos cargados y una muestra de alias para depuración."""
     sample = {}
     for i, (k, v) in enumerate(ALIASES.items()):
         if i >= 50:
@@ -355,40 +326,27 @@ def debug_models():
 
 @app.post("/generate")
 def generate(body: GenerateBody):
-    """
-    Genera STL:
-      - slug: admite kebab o snake; se normaliza a snake para el builder
-      - storage: guarda en carpeta kebab-case <slug>/forge-output.stl
-      - text_ops: opcional (si hay util en models)
-    """
-    # 0) Entrada base
     raw_slug = (body.slug or body.model or "").strip()
     incoming_params = dict(body.params or {})
 
-    # 1) Slug normalizado (builder) y posible adaptación
     base_slug = _norm_slug_for_builder(raw_slug)
     adapter = ADAPTERS.get(base_slug)
 
     if adapter:
-        # Adaptamos params y *cambiamos* el slug de destino
         builder_slug, adapted = adapter(incoming_params)
-        # sobrescribimos params con los adaptados; los agujeros se añaden después
         params = dict(adapted)
     else:
         builder_slug = base_slug
         params = dict(incoming_params)
 
-    # --------- Autocarga si no está en REGISTRY ---------
     if builder_slug and builder_slug not in REGISTRY:
         _lazy_load_builder(builder_slug)
-
     if not builder_slug or builder_slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{builder_slug}' not found")
 
     storage_slug = _slug_for_storage(builder_slug)
     builder = REGISTRY[builder_slug]
 
-    # 2) Params saneados + alias round->fillet + holes normalizados
     if "round_mm" in params and "fillet_mm" not in params:
         try:
             params["fillet_mm"] = float(params["round_mm"])
@@ -396,7 +354,6 @@ def generate(body: GenerateBody):
             pass
     params["holes"] = _normalize_holes(body.holes)
 
-    # 3) Geometría base (dict o firma posicional)
     try:
         result = builder(params)
     except TypeError:
@@ -407,16 +364,15 @@ def generate(body: GenerateBody):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # 4) Texto opcional: intenta 3 ubicaciones conocidas, sin romper si no están
     _applier = None
     try:
-        from models import apply_text_ops as _applier  # opción 1
+        from models import apply_text_ops as _applier
     except Exception:
         try:
-            from models.text import apply_text_ops as _applier  # opción 2
+            from models.text import apply_text_ops as _applier
         except Exception:
             try:
-                from models.text_ops import apply_text_ops as _applier  # opción 3
+                from models.text_ops import apply_text_ops as _applier
             except Exception:
                 _applier = None
 
@@ -424,17 +380,14 @@ def generate(body: GenerateBody):
         try:
             result = _applier(result, [op.dict() for op in body.text_ops])
         except Exception:
-            # si falla el texto, seguimos con la geometría base
             pass
 
-    # 5) Serializar STL
     stl_bytes, maybe_name = _as_stl_bytes(result)
     filename = maybe_name or "forge-output.stl"
-    object_path = f"{storage_slug}/{filename}"  # SIEMPRE kebab en el bucket
+    object_path = f"{storage_slug}/{filename}"
 
-    # 6) Subir (el helper NO acepta keyword 'key', va posicional)
     try:
-        out = upload_and_get_url(stl_bytes, object_path)  # -> {path,url?,signed_url?}
+        out = upload_and_get_url(stl_bytes, object_path)
         return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
@@ -443,11 +396,6 @@ def generate(body: GenerateBody):
 
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
-    """
-    Borra TODAS las claves del bucket cuyo primer segmento contenga '_' .
-    Protegido por 'CLEANUP_TOKEN' (enviar como header 'x-cleanup-token').
-    Úsalo una sola vez para limpiar carpetas snake_case antiguas.
-    """
     token = request.headers.get("x-cleanup-token", "")
     if not CLEANUP_TOKEN or token != CLEANUP_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
