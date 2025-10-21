@@ -7,6 +7,35 @@ import sys
 import traceback
 from typing import Any, Dict, Iterable, Optional, Tuple, List
 
+# ---- Compat trimesh: añade apply_rotation a Trimesh si no existe
+try:
+    import numpy as _np  # type: ignore
+    import trimesh as _trm  # type: ignore
+
+    if not hasattr(_trm.Trimesh, "apply_rotation"):
+        def _apply_rotation(self, angle_deg: float = 0.0, axis=(0.0, 0.0, 1.0), point=None):
+            """
+            Compatibilidad para builders antiguos que llaman `apply_rotation`.
+            Implementa una rotación alrededor de `axis` (x,y,z) en grados.
+            """
+            try:
+                angle = float(angle_deg) * _np.pi / 180.0
+                axis_v = _np.asarray(axis, dtype=float)
+                n = _np.linalg.norm(axis_v)
+                if n == 0:
+                    return
+                axis_v = axis_v / n
+                T = _trm.transformations.rotation_matrix(angle, axis_v, point)
+                self.apply_transform(T)
+            except Exception:
+                # No interrumpir el flujo de generación si algo va mal
+                pass
+
+        setattr(_trm.Trimesh, "apply_rotation", _apply_rotation)
+except Exception:
+    # Si no hay trimesh/numpy disponibles en import-time, seguimos sin el patch.
+    pass
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -237,14 +266,14 @@ def _lazy_load_builder(slug_snake: str) -> None:
         mod = importlib.import_module(f"models.{slug_snake}")
         cand = None
         # funciones directas
-        for name in ("build", "make", "make_model"):
+        for name in ("build", "make", "make_model", "generate"):
             f = getattr(mod, name, None)
             if callable(f):
                 cand = f
                 break
         # diccionario BUILD
         if cand is None and isinstance(getattr(mod, "BUILD", None), dict):
-            for key in ("make", "build"):
+            for key in ("make", "build", "generate"):
                 f = mod.BUILD.get(key)
                 if callable(f):
                     cand = f
@@ -299,10 +328,9 @@ def generate(body: GenerateBody):
     # 1) Slug para builder y para storage
     builder_slug = _norm_slug_for_builder(body.slug or body.model or "")
 
-    # --------- LÍNEAS CLAVE: fallback de autocarga si no está en REGISTRY ---------
+    # Fallback de autocarga si no está en REGISTRY
     if builder_slug and builder_slug not in REGISTRY:
         _lazy_load_builder(builder_slug)
-    # ------------------------------------------------------------------------------
 
     if not builder_slug or builder_slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{builder_slug}' not found")
@@ -357,8 +385,7 @@ def generate(body: GenerateBody):
 
     # 6) Subir (el helper NO acepta keyword 'key', va posicional)
     try:
-        # esperado: upload_and_get_url(data_bytes, object_path) -> dict con {path,url,signed_url}
-        out = upload_and_get_url(stl_bytes, object_path)  # <-- POSICIONAL
+        out = upload_and_get_url(stl_bytes, object_path)  # esperado: {path,url?,signed_url?}
         return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
