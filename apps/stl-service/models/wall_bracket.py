@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Any, List
 import trimesh
 
-SLUGS = ["monitor-stand"]
+SLUGS = ["wall-bracket"]
 
 def _num(p: Dict[str, Any], k: str, d: float) -> float:
     try: return float(str(p.get(k, d)).replace(",", "."))
@@ -14,23 +14,14 @@ def _union(ms: List[trimesh.Trimesh]):
     except: return ms[0]
 
 def make(params: Dict[str, Any]) -> trimesh.Trimesh:
-    L = _num(params, "length_mm", 400)
-    W = _num(params, "width_mm", 200)
-    H = _num(params, "height_mm", 70)
+    L = _num(params, "length_mm", 120)   # ala horizontal
+    W = _num(params, "width_mm", 40)
+    H = _num(params, "height_mm", 80)    # ala vertical
     T = _num(params, "thickness_mm", 4)
 
-    top = _box(L, W, T)
-    top.apply_translation((0,0,H+T/2-1e-6))
-
-    leg_d = max(40.0, W*0.25)
-    leg_w = max(30.0, L*0.15)
-
-    left = _box(leg_w, leg_d, H)
-    left.apply_translation((-L/2+leg_w/2, 0, H/2))
-
-    right = _box(leg_w, leg_d, H)
-    right.apply_translation(( L/2-leg_w/2, 0, H/2))
-
-    return _union([top, left, right])
+    base = _box(L, W, T)
+    upright = _box(T, W, H)
+    upright.apply_translation((L/2 - T/2, 0, H/2 + T/2))
+    return _union([base, upright])
 
 BUILD = {"make": make}

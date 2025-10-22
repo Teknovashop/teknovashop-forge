@@ -1,57 +1,42 @@
-# apps/stl-service/models/tablet_stand.py
 from __future__ import annotations
-import math
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import trimesh
-from trimesh.transformations import rotation_matrix
 
-NAME = "tablet_stand"
+SLUGS = ["tablet-stand"]
 
-def _bool_diff(base: trimesh.Trimesh, cutter: trimesh.Trimesh) -> trimesh.Trimesh:
+def _num(p: Dict[str, Any], k: str, d: float) -> float:
+    v = p.get(k, d)
     try:
-        engine = "scad" if trimesh.interfaces.scad.exists else None
-        out = base.difference(cutter, engine=engine)
-        if isinstance(out, list):
-            return trimesh.util.concatenate(out)
-        return out or base
+        return float(str(v).replace(",", "."))
     except Exception:
-        try:
-            out = trimesh.boolean.difference([base, cutter], engine="scad" if trimesh.interfaces.scad.exists else None)
-            if isinstance(out, list):
-                return trimesh.util.concatenate(out)
-            return out or base
-        except Exception:
-            return base
+        return float(d)
 
-def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
-    # UI: width, depth, angle_deg, lip_h, wall
-    w = float(params.get("width", 160))
-    d = float(params.get("depth", 140))
-    ang = float(params.get("angle_deg", 65))
-    lip_h = float(params.get("lip_h", 10))
-    t = float(params.get("wall", 4))
+def _plate(L: float, W: float, T: float) -> trimesh.Trimesh:
+    return trimesh.creation.box((L, W, T))
 
-    # Base
-    base = trimesh.creation.box(extents=(w, d, t))
-    base.apply_translation((0, 0, t/2))
-
-    # Respaldo (lo hacemos de altura proporcional a 'depth')
-    back_h = max(d * 0.8, 80.0)
-    back = trimesh.creation.box(extents=(w, t, back_h))
-    # rotación sobre eje X para simular el ángulo solicitado
-    R = rotation_matrix(math.radians(ang), (1, 0, 0), point=(0, d/2 - t/2, t))
-    back.apply_translation((0, d/2 - t/2, back_h/2))
-    back.apply_transform(R)
-
-    # Labio frontal
-    lip = trimesh.creation.box(extents=(w, t, lip_h))
-    lip.apply_translation((0, -d/2 + t/2, lip_h/2))
-
-    mesh = trimesh.util.concatenate([base, back, lip])
-    return mesh
+def _union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
+    try:
+        m = trimesh.util.concatenate(meshes)
+        m.remove_duplicate_faces()
+        return m
+    except Exception:
+        return meshes[0]
 
 def make(params: Dict[str, Any]) -> trimesh.Trimesh:
-    return make_model(params)
+    L = _num(params, "length_mm", 160)
+    W = _num(params, "width_mm", 140)   # profundidad
+    H = _num(params, "height_mm", 120)  # altura respaldo
+    T = _num(params, "thickness_mm", 4)
+
+    base = _plate(L, W, T)
+    back = _plate(L, T, H)
+    back.apply_translation((0.0, W/2 - T/2, H/2))
+
+    lip_h = max(6.0, _num(params, "fillet_mm", 8))  # reutilizamos fillet como pestaña
+    lip = _plate(L, T, lip_h)
+    lip.apply_translation((0.0, -W/2 + T/2, lip_h/2))
+
+    out = _union([base, back, lip])
+    return out
 
 BUILD = {"make": make}
-__all__ = ["NAME", "make_model", "make", "BUILD"]
