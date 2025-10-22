@@ -1,36 +1,20 @@
-from __future__ import annotations
-from typing import Dict, Any, List
-import trimesh
 
+from __future__ import annotations
+from typing import Dict, Any
+import trimesh
+from ._helpers import num, box, difference
+
+NAME = "monitor_stand"
 SLUGS = ["monitor-stand"]
 
-def _num(p: Dict[str, Any], k: str, d: float) -> float:
-    try: return float(str(p.get(k, d)).replace(",", "."))
-    except: return d
+def make_model(p: Dict[str, Any]) -> trimesh.Trimesh:
+    W = float(num(p.get("width") or p.get("length_mm"), 400.0))
+    D = float(num(p.get("depth") or p.get("width_mm"), 200.0))
+    H = float(num(p.get("height") or p.get("height_mm"), 70.0))
+    T = float(num(p.get("wall") or p.get("thickness_mm"), 4.0))
 
-def _box(x,y,z): return trimesh.creation.box((x,y,z))
-def _union(ms: List[trimesh.Trimesh]):
-    try: return trimesh.util.concatenate(ms)
-    except: return ms[0]
+    outer = box((W, D, H))
+    inner = box((max(W - 2 * T, 1), max(D - 2 * T, 1), max(H - 2 * T, 1)))
+    return difference(outer, inner)
 
-def make(params: Dict[str, Any]) -> trimesh.Trimesh:
-    L = _num(params, "length_mm", 400)
-    W = _num(params, "width_mm", 200)
-    H = _num(params, "height_mm", 70)
-    T = _num(params, "thickness_mm", 4)
-
-    top = _box(L, W, T)
-    top.apply_translation((0,0,H+T/2-1e-6))
-
-    leg_d = max(40.0, W*0.25)
-    leg_w = max(30.0, L*0.15)
-
-    left = _box(leg_w, leg_d, H)
-    left.apply_translation((-L/2+leg_w/2, 0, H/2))
-
-    right = _box(leg_w, leg_d, H)
-    right.apply_translation(( L/2-leg_w/2, 0, H/2))
-
-    return _union([top, left, right])
-
-BUILD = {"make": make}
+BUILD = {"make": make_model}

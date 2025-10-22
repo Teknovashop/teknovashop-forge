@@ -1,31 +1,17 @@
+
 from __future__ import annotations
 from typing import Dict, Any
 import trimesh
+from ._helpers import num, plate_with_holes, parse_holes
 
+NAME = "camera_plate"
 SLUGS = ["camera-plate"]
 
-def _num(p: Dict[str, Any], k: str, d: float) -> float:
-    try: return float(str(p.get(k, d)).replace(",", "."))
-    except: return d
+def make_model(p: Dict[str, Any]) -> trimesh.Trimesh:
+    L = float(num(p.get("length_mm") or p.get("length"), 120.0))
+    W = float(num(p.get("width_mm") or p.get("width"), 60.0))
+    T = float(num(p.get("thickness_mm") or p.get("thickness"), 3.0))
+    holes = parse_holes(p.get("holes") or [])
+    return plate_with_holes(L, W, T, holes)
 
-def make(params: Dict[str, Any]) -> trimesh.Trimesh:
-    L = _num(params, "length_mm", 50)
-    W = _num(params, "width_mm", 45)
-    T = _num(params, "thickness_mm", 6)
-    screw_d = _num(params, "screw_d", 6.35)  # 1/4"
-    slot_len = _num(params, "slot_len", 18)
-    slot_w = _num(params, "slot_w", 6)
-
-    plate = trimesh.creation.box((L, W, T))
-
-    hole = trimesh.creation.cylinder(radius=screw_d/2, height=T*1.5, sections=64)
-    slot = trimesh.creation.box((slot_len, slot_w, T*1.6))
-
-    try:
-        out = plate.difference([hole, slot])
-        if isinstance(out, trimesh.Trimesh): return out
-    except Exception:
-        pass
-    return plate
-
-BUILD = {"make": make}
+BUILD = {"make": make_model}

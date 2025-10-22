@@ -1,60 +1,59 @@
-# apps/stl-service/models/_helpers.py
-from typing import Iterable, List, Tuple, Union
 
-HoleLike = Union[Tuple[float, float, float], List[float], dict]
+from __future__ import annotations
+from typing import Iterable, Tuple, List, Any, Optional
+import trimesh
 
-def _coerce_float(v, default=0.0) -> float:
+def num(x: Any, default: Optional[float] = None) -> Optional[float]:
+    if x is None:
+        return default
+    if isinstance(x, (int, float)):
+        return float(x)
     try:
-        return float(v)
+        return float(str(x).replace(",", "."))
     except Exception:
-        return float(default)
+        return default
 
-def parse_holes(holes: Iterable[HoleLike]) -> List[Tuple[float, float, float]]:
-    """
-    Normaliza agujeros a lista de tuplas (x, y, d) en milímetros.
-    Soporta:
-      - (x, y, d) o [x, y, d]
-      - {x, y, d}
-      - {x_mm, z_mm, d_mm}  <- usado por el frontend actual
-      - {x, z, d}
-    Ignora silenciosamente entradas inválidas.
-    """
+def parse_holes(holes_in: Iterable[Any]) -> List[Tuple[float, float, float]]:
     out: List[Tuple[float, float, float]] = []
-
-    for h in holes or []:
-        # Tupla/lista
-        if isinstance(h, (tuple, list)):
-            if len(h) >= 3:
-                x = _coerce_float(h[0])
-                y = _coerce_float(h[1])
-                d = _coerce_float(h[2])
-                out.append((x, y, d))
-            continue
-
-        # Diccionario
+    for h in holes_in or []:
         if isinstance(h, dict):
-            # variantes con sufijo _mm (frontend)
-            if "x_mm" in h and "z_mm" in h and ("d_mm" in h or "diameter" in h or "d" in h):
-                x = _coerce_float(h.get("x_mm"))
-                y = _coerce_float(h.get("z_mm"))   # usamos Z del visor como Y del modelo 2D
-                d = _coerce_float(h.get("d_mm", h.get("diameter", h.get("d"))))
-                out.append((x, y, d))
-                continue
-
-            # variantes x/z/d (por compatibilidad)
-            if "x" in h and "z" in h and ("d_mm" in h or "d" in h):
-                x = _coerce_float(h.get("x"))
-                y = _coerce_float(h.get("z"))
-                d = _coerce_float(h.get("d_mm", h.get("d")))
-                out.append((x, y, d))
-                continue
-
-            # variante clásica x/y/d
-            if "x" in h and "y" in h and ("d" in h or "d_mm" in h):
-                x = _coerce_float(h.get("x"))
-                y = _coerce_float(h.get("y"))
-                d = _coerce_float(h.get("d", h.get("d_mm")))
-                out.append((x, y, d))
-                continue
-
+            x = num(h.get("x"), 0.0)
+            y = num(h.get("y"), 0.0)
+            d = num(h.get("diam_mm") or h.get("diameter") or h.get("diameter_mm") or h.get("d"), 0.0)
+            if x is not None and y is not None and d and d > 0:
+                out.append((float(x), float(y), float(d)))
+        elif isinstance(h, (list, tuple)) and len(h) >= 3:
+            xv = num(h[0]); yv = num(h[1]); dv = num(h[2])
+            if xv is not None and yv is not None and dv and dv > 0:
+                out.append((float(xv), float(yv), float(dv)))
     return out
+
+def box(extents):
+    return trimesh.creation.box(extents=extents)
+
+def cylinder(radius, height, sections=64):
+    return trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
+
+def difference(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
+    engine = "scad" if getattr(trimesh.interfaces.scad, "exists", False) else None
+    res = a.difference(b, engine=engine)
+    if isinstance(res, trimesh.Trimesh):
+        return res
+    try:
+        return res.dump().sum()
+    except Exception:
+        return a
+
+def plate_with_holes(L: float, W: float, T: float, holes: List[Tuple[float, float, float]]):
+    base = box((L, W, T))
+    if not holes:
+        return base
+    cutters = []
+    for (x, y, d) in holes:
+        r = d / 2.0
+        h = T * 1.5
+        c = cylinder(r, h)
+        c.apply_translation((x, y, 0.0))
+        cutters.append(c)
+    cutter = cutters[0] if len(cutters) == 1 else trimesh.util.concatenate(cutters)
+    return difference(base, cutter)

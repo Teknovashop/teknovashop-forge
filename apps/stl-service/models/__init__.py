@@ -1,4 +1,4 @@
-# apps/stl-service/models/__init__.py
+
 """
 Autodiscovery de builders de FORGE.
 
@@ -52,7 +52,7 @@ def _add_alias(raw_slug: str, target_snake: str) -> None:
 
 # Explora módulos de primer nivel en `models/`
 for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
-    if _ispkg or _name in {"__init__", "text", "text_ops", "common"}:
+    if _ispkg or _name in {"__init__", "text", "text_ops", "_helpers", "common"}:
         continue
 
     try:
@@ -136,11 +136,8 @@ for candidate in ("text", "text_ops"):
 
 # --------------------- API de ayuda (opcional) -----------------------
 
-def get_builder(slug_or_name: str) -> Callable | None:
-    """
-    Resuelve un slug en snake usando ALIASES y devuelve el callable
-    registrado si existe (o None).
-    """
+def get_builder(slug_or_name: str):
+    """Resuelve un slug en snake usando ALIASES y devuelve el callable."""
     if not slug_or_name:
         return None
     raw = slug_or_name.strip().lower()
