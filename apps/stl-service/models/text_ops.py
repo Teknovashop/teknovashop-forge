@@ -1,223 +1,246 @@
 # apps/stl-service/models/text_ops.py
-"""
-Aplicación de texto (engrave/emboss) sobre un mesh con Trimesh.
-
-- Detecta el eje de menor espesor del modelo para “pegar” el texto sobre esa cara.
-- EMBOSS (relieve): concatena el texto como volumen positivo (estable).
-- ENGRAVE (grabar): intenta boolean.difference; si no hay backend booleano,
-  hace fallback a emboss para que el usuario vea algo.
-
-Parámetros esperados por cada op:
-{
-  "text": str,
-  "size": float,     # alto del texto en mm (aprox)
-  "depth": float,    # altura de extrusión en mm
-  "mode": "engrave" | "emboss",
-  "pos": [x,y,z],    # opcional, mm
-  "rot": [rx,ry,rz], # opcional, grados (Euler ZYX); normalmente con rz basta
-  "font": str | None # opcional; se usa el default del sistema si no hay
-}
-"""
-
 from __future__ import annotations
 import math
-from typing import Iterable, List, Dict, Any, Tuple
+from typing import Iterable, Mapping, Optional, Literal, Tuple, List
 
 import numpy as np
 import trimesh
 
+# Trimesh: texto vectorial 2D
 try:
-    import shapely.affinity as s_aff
-except Exception:
-    s_aff = None  # sólo afecta a un escalado más preciso
+    from trimesh.path.creation import text as path_text
+except Exception:  # compat viejo
+    path_text = None
 
-# ----------------------------- utilidades -----------------------------
+from shapely.geometry import Polygon  # asegúrate de tener shapely instalado
+from shapely.ops import unary_union
 
-def _as_mesh_list(obj) -> List[trimesh.Trimesh]:
-    if obj is None:
-        return []
-    if isinstance(obj, trimesh.Trimesh):
-        return [obj]
-    if isinstance(obj, (list, tuple)):
-        out: List[trimesh.Trimesh] = []
-        for it in obj:
-            if isinstance(it, trimesh.Trimesh):
-                out.append(it)
-        return out
-    # Scene u otros: intentar “dump” de geometrías
-    if hasattr(obj, "geometry"):
-        try:
-            return [g for g in obj.geometry.values() if isinstance(g, trimesh.Trimesh)]
-        except Exception:
-            pass
-    return []
 
-def _bbox_extents(mesh: trimesh.Trimesh) -> np.ndarray:
-    # eje-alineado
-    return mesh.bounds[1] - mesh.bounds[0]
+Anchor = Literal["top", "bottom", "front", "back", "left", "right"]
 
-def _thickness_axis(mesh: trimesh.Trimesh) -> int:
-    ex = _bbox_extents(mesh)
-    return int(np.argmin(ex))  # 0=x, 1=y, 2=z
 
-def _center(mesh: trimesh.Trimesh) -> np.ndarray:
-    return mesh.bounds.mean(axis=0)
+def _concat(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
+    lst = [m for m in meshes if isinstance(m, trimesh.Trimesh) and len(m.vertices)]
+    if not lst:
+        return trimesh.Trimesh()
+    return trimesh.util.concatenate(lst)
 
-def _rot_zxy(rx: float, ry: float, rz: float) -> np.ndarray:
-    # Euler ZYX en grados -> matriz 4x4
-    Rx = trimesh.transformations.rotation_matrix(math.radians(rx), [1, 0, 0])
-    Ry = trimesh.transformations.rotation_matrix(math.radians(ry), [0, 1, 0])
-    Rz = trimesh.transformations.rotation_matrix(math.radians(rz), [0, 0, 1])
-    return trimesh.transformations.concatenate_matrices(Rz, Ry, Rx)
 
-def _align_Z_to_axis(axis: int) -> np.ndarray:
+def _bounds_center_extents(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mn, mx = mesh.bounds
+    mn = np.asarray(mn, dtype=float)
+    mx = np.asarray(mx, dtype=float)
+    c = (mn + mx) * 0.5
+    e = (mx - mn)
+    return mn, mx, e, c
+
+
+def _make_text_solid(text: str, height: float, depth: float, font: Optional[str]) -> Optional[trimesh.Trimesh]:
     """
-    Devuelve una matriz que lleva el local +Z del texto a (X|Y|Z) según 'axis'.
+    Crea un sólido 3D del texto:
+      - altura (mm) ≈ tamaño del bloque de mayúsculas
+      - profundidad = extrusión
     """
-    target = np.zeros(3)
-    target[axis] = 1.0  # unit vector
-    return trimesh.geometry.align_vectors([0, 0, 1], target)
-
-def _safe_boolean_difference(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh | None:
-    try:
-        diff = trimesh.boolean.difference(a, b, engine=None)  # deja que elija motor
-        if isinstance(diff, list) and diff:
-            return trimesh.util.concatenate(diff)
-        if isinstance(diff, trimesh.Trimesh):
-            return diff
-    except Exception:
-        return None
-    return None
-
-# -------------------- construcción del mesh de texto ------------------
-
-def _build_text_mesh(op: Dict[str, Any]) -> trimesh.Trimesh | None:
-    text = str(op.get("text", "") or "").strip()
-    if not text:
+    if not text or not path_text:
         return None
 
-    size = float(op.get("size", 6.0)) or 6.0  # alto del texto en mm
-    depth = float(op.get("depth", 1.2)) or 1.2
-    font = op.get("font", None)
+    # Path 2D de glifos (en el plano XY)
+    path = path_text(text=text, font=font)  # Path2D/Path3D
+    if path is None or (hasattr(path, "entities") and len(path.entities) == 0):
+        return None
 
-    # 1) Path 2D del texto
-    path2d = None
-    try:
-        # Trimesh genera un Path2D del texto; requiere freetype (viene en muchas imágenes)
-        path2d = trimesh.path.creation.text(text=text, font=font)
-    except Exception:
-        path2d = None
+    # Escalar a 'height'
+    b = np.array(path.bounds)  # [[minx,miny],[maxx,maxy]]
+    ext2 = b[1] - b[0]
+    scale = (height / max(1e-6, ext2[1]))  # normalizamos por la altura del texto
+    path = path.copy()
+    path.apply_scale(scale)
 
-    if path2d is None:
-        # Fallback MUY simple: una caja que simula “etiqueta” de ancho ~0.6 * size * len(text)
-        # Así, al menos, el usuario ve “algo” en relieve.
-        approx_w = max(size * 0.6 * max(len(text), 1), size)
-        label = trimesh.creation.box((approx_w, size * 0.2, depth))
-        # centrar en XY (que su “base” esté en Z=0)
-        label.apply_translation((-label.extents[0] / 2, -label.extents[1] / 2, 0))
-        return label
+    # Centrar en el origen (para anclar fácil)
+    b2 = np.array(path.bounds)
+    c2 = (b2[0] + b2[1]) * 0.5
+    path.apply_translation([-c2[0], -c2[1], 0])
 
-    # 2) Escalado del path para que su altura ~ size
-    minx, miny = path2d.bounds[0]
-    maxx, maxy = path2d.bounds[1]
-    h = max(1e-6, (maxy - miny))
-    scale = size / h
-
-    if s_aff is not None:
-        # con shapely: escalar el path y volver a crear Path2D
+    # Polígonos con huecos
+    polys: List[Polygon] = list(getattr(path, "polygons_full", []))
+    if not polys:
+        # último intento: fusionar segmentos
         try:
-            polys = [s_aff.scale(p, xfact=scale, yfact=scale, origin=(0, 0)) for p in path2d.polygons_full]
+            polys = [unary_union(polys)]
         except Exception:
-            polys = path2d.polygons_full
-    else:
-        # sin shapely: escalar vértices del path
-        path2d = path2d.copy()
-        path2d.vertices[:] *= scale
-        polys = path2d.polygons_full
+            return None
 
-    # 3) Extruir todos los polígonos (con huecos) y concatenar
-    parts: List[trimesh.Trimesh] = []
+    solids: List[trimesh.Trimesh] = []
     for poly in polys:
         try:
-            m = trimesh.creation.extrude_polygon(poly, depth)
-            parts.append(m)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            m = trimesh.creation.extrude_polygon(poly, height=depth)
+            solids.append(m)
         except Exception:
             continue
 
-    if not parts:
-        return None
+    return _concat(solids)
 
-    mesh = trimesh.util.concatenate(parts)
-    # Colocar base del texto sobre Z=0 y centrar en XY
-    bb = mesh.bounds
-    mesh.apply_translation((- (bb[0][0] + bb[1][0]) / 2.0, - (bb[0][1] + bb[1][1]) / 2.0, -bb[0][2]))
-    return mesh
 
-# ------------------------ API principal a exportar --------------------
+def _axis_from_anchor(mesh: trimesh.Trimesh, anchor: Anchor) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Devuelve (origin, normal) para el anclaje solicitado, en coords del mesh.
+    Convención:
+      X: izquierda(-)/derecha(+)
+      Y: atrás(-)/delante(+)
+      Z: abajo(-)/arriba(+)
+    """
+    mn, mx, _, c = _bounds_center_extents(mesh)
+    if anchor == "top":
+        origin = np.array([c[0], c[1], mx[2]])
+        normal = np.array([0, 0, 1.0])
+    elif anchor == "bottom":
+        origin = np.array([c[0], c[1], mn[2]])
+        normal = np.array([0, 0, -1.0])
+    elif anchor == "front":
+        origin = np.array([c[0], mx[1], c[2]])
+        normal = np.array([0, 1.0, 0])
+    elif anchor == "back":
+        origin = np.array([c[0], mn[1], c[2]])
+        normal = np.array([0, -1.0, 0])
+    elif anchor == "right":
+        origin = np.array([mx[0], c[1], c[2]])
+        normal = np.array([1.0, 0, 0])
+    else:  # "left"
+        origin = np.array([mn[0], c[1], c[2]])
+        normal = np.array([-1.0, 0, 0])
+    return origin, normal
+
+
+def _frame_from_normal(normal: np.ndarray) -> np.ndarray:
+    """
+    Matriz 4x4 que rota el plano XY para que su normal +Z pase a 'normal'.
+    """
+    n = np.asarray(normal, dtype=float)
+    n /= max(1e-9, np.linalg.norm(n))
+    # rotar Z -> n
+    R = trimesh.geometry.align_vectors(np.array([0, 0, 1.0]), n)
+    if R is None:
+        R = np.eye(4)
+    return R
+
+
+def _place_text_on_face(
+    text_mesh: trimesh.Trimesh,
+    base: trimesh.Trimesh,
+    anchor: Anchor,
+    pos: Tuple[float, float, float],
+    depth: float,
+    mode: str,
+) -> trimesh.Trimesh:
+    """
+    Coloca y orienta el sólido de texto sobre la cara (anchor) del 'base'.
+    'pos' son mm en el plano tangente (x=lado, y=arriba dentro del plano de texto).
+    Para evitar z-fighting, aplicamos un pequeño offset normal.
+    """
+    origin, normal = _axis_from_anchor(base, anchor)
+    R = _frame_from_normal(normal)
+
+    # Ejes tangentes del marco (columnas 0 y 1 tras R)
+    u = R[:3, 0]
+    v = R[:3, 1]
+    n = R[:3, 2]
+
+    # Offset normal: si es relieve, lo sacamos; si es grabado, lo metemos
+    n_clear = 0.05  # 0.05 mm para evitar coplanar
+    offset_n = (depth * 0.5 + n_clear) * (1.0 if mode == "emboss" else -1.0)
+
+    T = np.eye(4)
+    # colócalo en el origen del anclaje
+    T[:3, 3] = origin + u * float(pos[0]) + v * float(pos[1]) + n * float(offset_n)
+
+    M = T @ R  # primero rota el texto (XY->plano), luego traslada
+
+    tm = text_mesh.copy()
+    tm.apply_transform(M)
+    return tm
+
+
+def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    try:
+        from trimesh.boolean import union
+        res = union([a, b], engine=None)  # deja que escoja motor disponible
+        if isinstance(res, trimesh.Trimesh) and len(res.vertices):
+            return res
+    except Exception:
+        pass
+    return None
+
+
+def _boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    try:
+        from trimesh.boolean import difference
+        res = difference([a], [b], engine=None)
+        if isinstance(res, trimesh.Trimesh) and len(res.vertices):
+            return res
+    except Exception:
+        pass
+    return None
+
 
 def apply_text_ops(
-    base_mesh_or_meshes: Any,
-    ops: Iterable[Dict[str, Any]] | None
-):
+    base_mesh: trimesh.Trimesh,
+    ops: Iterable[Mapping],
+) -> trimesh.Trimesh:
     """
-    Devuelve un único Trimesh resultante de aplicar todas las ops al primer mesh.
-    Si recibimos una lista de meshes, trabajamos sobre su concatenación.
+    Aplica una lista de operaciones de texto.
+      op = {
+        "text": "VESA",
+        "size": 6,              # altura del texto (mm)
+        "depth": 1.2,           # extrusión (mm)
+        "mode": "engrave"|"emboss",
+        "pos": [x_mm, y_mm, 0], # desplazamiento en el plano anclado
+        "rot": [0,0,0],         # (no usado: la orientación la da el anchor)
+        "font": "DejaVuSans.ttf" | None,
+        "anchor": "front"|"back"|"left"|"right"|"top"|"bottom"   # NUEVO
+      }
     """
-    meshes = _as_mesh_list(base_mesh_or_meshes)
-    if not meshes:
-        return base_mesh_or_meshes
+    out = base_mesh.copy()
 
-    base = trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0].copy()
-    if not ops:
-        return base
-
-    # Detectar el eje de grosor (menor extensión)
-    axis = _thickness_axis(base)
-    ext = _bbox_extents(base)
-    bb = base.bounds
-    center = _center(base)
-
-    # Calcular posiciones “por defecto” en el plano de la cara “superior”
-    # - alineamos texto al centro en los otros ejes
-    # - lo “hundimos” un poco para que embeba (evita separación visual)
-    top = bb[1, axis]  # coordenada “superior” en eje de grosor
-    embed = max(0.2, 0.25)  # fracción de depth para embebido
-
-    for raw in ops:
-        try:
-            label = _build_text_mesh(raw)
-            if label is None:
-                continue
-
-            mode = str(raw.get("mode", "engrave") or "engrave").lower()
-            rx, ry, rz = [float(v) for v in (raw.get("rot") or [0, 0, 0])]
-            px, py, pz = [float(v) for v in (raw.get("pos") or [0, 0, 0])]
-            depth = float(raw.get("depth", 1.2) or 1.2)
-
-            # 1) Alinear +Z del texto con el eje de grosor del modelo
-            M_align = _align_Z_to_axis(axis)
-            label.apply_transform(M_align)
-
-            # 2) Rotación extra del usuario (Euler ZYX)
-            M_user = _rot_zxy(rx, ry, rz)
-            label.apply_transform(M_user)
-
-            # 3) Colocar en el centro del modelo en los ejes “anchos”
-            pos = center.copy()
-            # sobre la cara superior (un poco embebido)
-            pos[axis] = top - depth * embed
-            # aplicar offset del usuario
-            pos += np.array([px, py, pz], dtype=float)
-            label.apply_translation(pos)
-
-            if mode == "emboss":
-                base = trimesh.util.concatenate([base, label])
-            else:
-                diff = _safe_boolean_difference(base, label)
-                base = diff if diff is not None else trimesh.util.concatenate([base, label])
-
-        except Exception:
-            # si algo falla en una op, seguimos con las demás
+    for op in ops or []:
+        text = (op.get("text") or "").strip()
+        if not text:
             continue
 
-    return base
+        size = float(op.get("size", 6.0))
+        depth = float(op.get("depth", 1.2))
+        mode = str(op.get("mode", "engrave")).lower().strip()
+        font = op.get("font") or None
+        pos = op.get("pos") or [0, 0, 0]
+        try:
+            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2] if len(pos) > 2 else 0.0)
+        except Exception:
+            px, py, pz = 0.0, 0.0, 0.0
+        anchor: Anchor = op.get("anchor") or "front"  # por defecto frente
+
+        solid = _make_text_solid(text=text, height=size, depth=depth, font=font)
+        if not isinstance(solid, trimesh.Trimesh) or len(solid.vertices) == 0:
+            # si no pudimos generar texto, no rompemos la pieza
+            continue
+
+        placed = _place_text_on_face(
+            text_mesh=solid, base=out, anchor=anchor, pos=(px, py, pz), depth=depth, mode=mode
+        )
+
+        if mode == "emboss":
+            # Intentar unión booleana; si falla, concatenamos (queda "pegado" pero visible)
+            merged = _boolean_union(out, placed)
+            out = merged if merged is not None else _concat([out, placed])
+        else:
+            # Grabado: probar diferencia booleana; si falla, mantenemos sin grabar
+            carved = _boolean_diff(out, placed)
+            if carved is not None:
+                out = carved
+            else:
+                # Fallback: si no hay motor booleano disponible, al menos deja el relieve
+                out = _concat([out, placed])
+
+    return out
