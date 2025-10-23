@@ -1,65 +1,68 @@
 # apps/stl-service/models/wall_hook.py
+from __future__ import annotations
 from typing import Dict, Any, List, Tuple
-import math
 import trimesh
-from trimesh.creation import box, cylinder
-from .utils_geo import plate_with_holes, concatenate
-from ._helpers import parse_holes
 
-NAME = "wall_hook"
+NAME  = "wall_hook"
+SLUGS = ["wall-hook", "wall-bracket-hook"]
 
 DEFAULTS: Dict[str, float] = {
-    "length_mm": 60.0,     # alto de placa
-    "width_mm": 40.0,      # ancho de placa
-    "height_mm": 50.0,     # salida del gancho
-    "thickness_mm": 5.0,   # espesor placa y gancho
-    "fillet_mm": 3.0
+    "base_w": 40.0,
+    "base_h": 60.0,
+    "wall": 3.5,          # grosor de placa
+    "hook_depth": 35.0,   # cuanto sobresale el gancho
+    "hook_height": 35.0,  # altura del labio
+    "hook_t": 8.0,        # grosor del gancho (sección)
+    "hole_d": 4.5,
+    "hole_off": 12.0,     # separación a bordes
 }
 
-TYPES: Dict[str, str] = {
-    "length_mm": "float",
-    "width_mm": "float",
-    "height_mm": "float",
-    "thickness_mm": "float",
-    "fillet_mm": "float",
-    "holes": "list[tuple[float,float,float]]",
-}
+def _num(p: Dict[str, Any], k: str, fb: float) -> float:
+    try:
+        return float(str(p.get(k, fb)).replace(",", "."))
+    except Exception:
+        return fb
 
-def _hook_arm(Lout: float, T: float) -> trimesh.Trimesh:
-    """
-    Brazo del gancho: L en Z con ligera curva final aproximada con cilindros.
-    """
-    # tramo recto
-    arm = box(extents=(T, T, Lout*0.75))
-    arm.apply_translation((0, T/2.0, Lout*0.75/2.0))
-    # extremo curvo
-    tip = cylinder(radius=T/2.0, height=T, sections=64)
-    tip.apply_rotation(trimesh.transformations.rotation_matrix(math.pi/2, [1,0,0]))
-    tip.apply_translation((0, T, Lout*0.75))
-    return concatenate([arm, tip])
+def _holes_grid(w: float, h: float, off: float, d: float) -> List[Tuple[float,float,float]]:
+    # 2 agujeros en vertical (centrados en X)
+    return [(0.0,  h*0.5 - off, d), (0.0, -h*0.5 + off, d)]
 
-def make_model(params: Dict[str, Any], holes: List[Tuple[float, float, float]] = ()) -> trimesh.Trimesh:
-    Hplate = float(params.get("length_mm", DEFAULTS["length_mm"]))   # alto
-    Wplate = float(params.get("width_mm", DEFAULTS["width_mm"]))     # ancho
-    Lout   = float(params.get("height_mm", DEFAULTS["height_mm"]))   # salida
-    T      = float(params.get("thickness_mm", DEFAULTS["thickness_mm"]))
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    bw = _num(params, "base_w",       DEFAULTS["base_w"])
+    bh = _num(params, "base_h",       DEFAULTS["base_h"])
+    t  = _num(params, "wall",         DEFAULTS["wall"])
+    gd = _num(params, "hook_depth",   DEFAULTS["hook_depth"])
+    gh = _num(params, "hook_height",  DEFAULTS["hook_height"])
+    gt = _num(params, "hook_t",       DEFAULTS["hook_t"])
+    hd = _num(params, "hole_d",       DEFAULTS["hole_d"])
+    off= _num(params, "hole_off",     DEFAULTS["hole_off"])
 
-    # Placa de pared con agujeros (x,z,d)
-    hxz = parse_holes(holes) if holes else [(0, Hplate*0.25, 5.0), (0, -Hplate*0.25, 5.0)]
-    plate = plate_with_holes(Wplate, Hplate, T, hxz)
-    # rotarla para que la altura vaya en Y: nuestra util ya coloca espesor en Y, altura en Z;
-    # aquí la usamos tal cual para simplificar la colocación del brazo.
-    plate.apply_translation((0, 0, 0))
+    # Placa base con agujeros
+    plate = trimesh.creation.box(extents=(bw, bh, t))
+    holes = _holes_grid(bw, bh, off, hd)
+    cutters: List[trimesh.Trimesh] = []
+    for (x, y, d) in holes:
+        c = trimesh.creation.cylinder(radius=d*0.5, height=t*1.4, sections=72)
+        c.apply_translation((x, y, 0.0))
+        cutters.append(c)
+    if cutters:
+        cutter = trimesh.util.concatenate(cutters)
+        engine = "scad" if getattr(trimesh.interfaces.scad, "exists", False) else None
+        diff = plate.difference(cutter, engine=engine)
+        plate = diff if isinstance(diff, trimesh.Trimesh) else plate
 
-    # Brazo del gancho
-    arm = _hook_arm(Lout, T)
-    # Colocar el brazo saliendo del centro de la placa
-    arm.apply_translation((0, T, 0))
+    # Gancho en forma de "L": brazo + labio (misma altura Z=t)
+    arm  = trimesh.creation.box(extents=(gd, gt, t))
+    lip  = trimesh.creation.box(extents=(gt, gh, t))
 
-    # refuerzo bajo el brazo
-    gusset = box(extents=(Wplate*0.6, T, Lout*0.4))
-    gusset.apply_translation((0, T/2.0, Lout*0.2))
+    # Colocación (plano X-Y es la placa; el gancho sale hacia +X)
+    arm.apply_translation(( bw/2 + gd/2, -bh/2 + gt/2 + 2.0, 0.0))
+    lip.apply_translation(( bw/2 + gd - gt/2, -bh/2 + gh/2 + 2.0, 0.0))
 
-    mesh = concatenate([plate, arm, gusset])
-    # Por simplicidad, ya queda apoyado sobre Y=0; placa centrada en XZ
-    return mesh
+    return trimesh.util.concatenate([plate, arm, lip])
+
+def make(params: Dict[str, Any]) -> trimesh.Trimesh:
+    return make_model(params)
+
+BUILD = {"make": make}
+__all__ = ["NAME", "SLUGS", "DEFAULTS", "make", "make_model", "BUILD"]
