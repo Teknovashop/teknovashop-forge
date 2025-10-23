@@ -1,4 +1,3 @@
-# apps/stl-service/app.py
 from __future__ import annotations
 
 import io
@@ -8,7 +7,7 @@ import importlib
 import sys
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable
+from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +58,8 @@ class TextOp(BaseModel):
     pos: list[float] = Field(default_factory=lambda: [0, 0, 0])
     rot: list[float] = Field(default_factory=lambda: [0, 0, 0])
     font: Optional[str] = None
+    # NUEVO: anclaje de texto a una cara de la pieza
+    anchor: Optional[Literal["top", "bottom", "front", "back", "left", "right"]] = "front"
 
 class GenerateBody(BaseModel):
     slug: str                     # requerido por los builders (snake o kebab)
@@ -85,7 +86,7 @@ def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
         return (bytes(obj), None)
     if hasattr(obj, "read"):
         return (obj.read(), None)
-    if isinstance(obj, str):
+    if isinstance(obj, " ".__class__):
         if os.path.exists(obj):
             with open(obj, "rb") as f:
                 return (f.read(), os.path.basename(obj))
