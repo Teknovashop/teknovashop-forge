@@ -58,7 +58,7 @@ class TextOp(BaseModel):
     pos: list[float] = Field(default_factory=lambda: [0, 0, 0])
     rot: list[float] = Field(default_factory=lambda: [0, 0, 0])
     font: Optional[str] = None
-    # NUEVO: anclaje de texto a una cara de la pieza
+    # NUEVO: anclaje a cara de la pieza
     anchor: Optional[Literal["top", "bottom", "front", "back", "left", "right"]] = "front"
 
 class GenerateBody(BaseModel):
@@ -86,7 +86,7 @@ def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
         return (bytes(obj), None)
     if hasattr(obj, "read"):
         return (obj.read(), None)
-    if isinstance(obj, " ".__class__):
+    if isinstance(obj, str):
         if os.path.exists(obj):
             with open(obj, "rb") as f:
                 return (f.read(), os.path.basename(obj))
@@ -120,7 +120,7 @@ def _num(x: Any) -> Optional[float]:
 
 def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
     """
-    Convierte dicts en [(x,y,diam)] discartando inválidos.
+    Convierte dicts en [(x,y,diam)] descartando inválidos.
     Soporta claves: diam_mm, diameter_mm, diameter, d
     """
     out: List[tuple] = []
@@ -445,6 +445,7 @@ def generate(body: GenerateBody, request: Request):
         try:
             result = _applier(result, [op.dict() for op in body.text_ops])
         except Exception:
+            # nunca romper la pieza por el texto
             pass
 
     # 6) STL -> bytes
