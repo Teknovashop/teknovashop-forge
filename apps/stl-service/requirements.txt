@@ -14,3 +14,4 @@ supabase==2.20.0
 pillow==10.4.0
 pyglet==2.0.15
 
+freetype-py>=2.4
