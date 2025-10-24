@@ -1,6 +1,5 @@
-# apps/stl-service/models/text_ops.py
 from __future__ import annotations
-import math
+import os
 from typing import Iterable, Mapping, Optional, Literal, Tuple, List
 
 import numpy as np
@@ -9,11 +8,11 @@ import trimesh
 # Trimesh: texto vectorial 2D
 try:
     from trimesh.path.creation import text as path_text
-except Exception:  # compat viejo
+except Exception:  # compat
     path_text = None
 
-from shapely.geometry import Polygon  # asegúrate de tener shapely instalado
-from shapely.ops import unary_union
+from shapely.geometry import Polygon
+from shapely.ops import unary_union, polygonize
 
 
 Anchor = Literal["top", "bottom", "front", "back", "left", "right"]
@@ -26,7 +25,7 @@ def _concat(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
     return trimesh.util.concatenate(lst)
 
 
-def _bounds_center_extents(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _bounds_center_extents(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     mn, mx = mesh.bounds
     mn = np.asarray(mn, dtype=float)
     mx = np.asarray(mx, dtype=float)
@@ -35,50 +34,152 @@ def _bounds_center_extents(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, np.ndarra
     return mn, mx, e, c
 
 
-def _make_text_solid(text: str, height: float, depth: float, font: Optional[str]) -> Optional[trimesh.Trimesh]:
+def _try_make_path(text: str, font: Optional[str]):
     """
-    Crea un sólido 3D del texto:
-      - altura (mm) ≈ tamaño del bloque de mayúsculas
-      - profundidad = extrusión
+    Crea un Path2D con varios intentos de fuente.
     """
-    if not text or not path_text:
+    if not path_text or not text:
         return None
 
-    # Path 2D de glifos (en el plano XY)
-    path = path_text(text=text, font=font)  # Path2D/Path3D
-    if path is None or (hasattr(path, "entities") and len(path.entities) == 0):
-        return None
+    candidates: List[Optional[str]] = []
+    # 1) Lo que venga en la op
+    if font:
+        candidates.append(font)
+    # 2) ENV
+    candidates.append(os.getenv("FORGE_DEFAULT_FONT"))
+    # 3) rutas típicas Linux
+    candidates += [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    # 4) Por último, sin especificar fuente (default de PIL)
+    candidates.append(None)
 
-    # Escalar a 'height'
-    b = np.array(path.bounds)  # [[minx,miny],[maxx,maxy]]
-    ext2 = b[1] - b[0]
-    scale = (height / max(1e-6, ext2[1]))  # normalizamos por la altura del texto
-    path = path.copy()
-    path.apply_scale(scale)
-
-    # Centrar en el origen (para anclar fácil)
-    b2 = np.array(path.bounds)
-    c2 = (b2[0] + b2[1]) * 0.5
-    path.apply_translation([-c2[0], -c2[1], 0])
-
-    # Polígonos con huecos
-    polys: List[Polygon] = list(getattr(path, "polygons_full", []))
-    if not polys:
-        # último intento: fusionar segmentos
+    for cand in candidates:
         try:
-            polys = [unary_union(polys)]
+            # Algunos builds aceptan ruta en 'font', otros nombre
+            if cand:
+                p = path_text(text=text, font=cand)
+            else:
+                p = path_text(text=text)
+            if p is None:
+                continue
+            if hasattr(p, "entities") and len(p.entities) == 0:
+                continue
+            return p
+        except TypeError:
+            # intentos alternativos de firma
+            try:
+                if cand:
+                    p = path_text(text, font=cand)
+                else:
+                    p = path_text(text)
+                if p and (not hasattr(p, "entities") or len(p.entities) > 0):
+                    return p
+            except Exception:
+                pass
         except Exception:
-            return None
+            continue
+    return None
 
-    solids: List[trimesh.Trimesh] = []
+
+def _polygons_from_path(path) -> List[Polygon]:
+    """
+    Extrae polígonos de un Path2D de trimesh de forma robusta.
+    """
+    polys: List[Polygon] = []
+
+    for attr in ("polygons_full", "polygons_closed"):
+        try:
+            vals = list(getattr(path, attr, []) or [])
+            if vals:
+                polys.extend(vals)
+        except Exception:
+            pass
+
+    # Fallbacks
+    if not polys:
+        try:
+            if hasattr(path, "to_polygons"):
+                vals = path.to_polygons()
+                if vals:
+                    polys.extend(vals)
+        except Exception:
+            pass
+
+    if not polys:
+        # Como último recurso, usar segmentos discretos y polygonize
+        try:
+            if hasattr(path, "discrete"):
+                geoms = list(polygonize(path.discrete))
+                for g in geoms:
+                    if isinstance(g, Polygon):
+                        polys.append(g)
+        except Exception:
+            pass
+
+    # Sanea
+    cleaned: List[Polygon] = []
     for poly in polys:
         try:
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            if poly.is_empty:
-                continue
+            if not poly.is_empty:
+                cleaned.append(poly)
+        except Exception:
+            continue
+
+    # Unión si hay muchos fragmentos minúsculos
+    if len(cleaned) > 20:
+        try:
+            u = unary_union(cleaned)
+            if isinstance(u, Polygon):
+                return [u]
+            # multipolygons -> lista
+            return [g for g in getattr(u, "geoms", []) if isinstance(g, Polygon)]
+        except Exception:
+            pass
+
+    return cleaned
+
+
+def _make_text_solid(text: str, height: float, depth: float, font: Optional[str]) -> Optional[trimesh.Trimesh]:
+    """
+    Crea un sólido 3D del texto:
+      - height (mm) ≈ alto de caja de glifos
+      - depth (mm)  = extrusión
+    """
+    path = _try_make_path(text, font)
+    if path is None:
+        return None
+
+    # Escala a 'height' (usamos la altura del bounds en Y)
+    try:
+        b = np.array(path.bounds)  # [[minx,miny],[maxx,maxy]]
+        ext2 = b[1] - b[0]
+        ref = float(ext2[1]) if ext2[1] != 0 else 1.0
+        scale = float(height) / max(1e-6, ref)
+        path = path.copy()
+        path.apply_scale(scale)
+        # Centrar en origen
+        b2 = np.array(path.bounds)
+        c2 = (b2[0] + b2[1]) * 0.5
+        path.apply_translation([-float(c2[0]), -float(c2[1]), 0.0])
+    except Exception:
+        pass
+
+    polys = _polygons_from_path(path)
+    if not polys:
+        return None
+
+    solids: List[trimesh.Trimesh] = []
+    for poly in polys:
+        try:
             m = trimesh.creation.extrude_polygon(poly, height=depth)
-            solids.append(m)
+            if isinstance(m, trimesh.Trimesh) and len(m.vertices):
+                solids.append(m)
         except Exception:
             continue
 
@@ -87,11 +188,7 @@ def _make_text_solid(text: str, height: float, depth: float, font: Optional[str]
 
 def _axis_from_anchor(mesh: trimesh.Trimesh, anchor: Anchor) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Devuelve (origin, normal) para el anclaje solicitado, en coords del mesh.
-    Convención:
-      X: izquierda(-)/derecha(+)
-      Y: atrás(-)/delante(+)
-      Z: abajo(-)/arriba(+)
+    Devuelve (origin, normal) para el anclaje solicitado.
     """
     mn, mx, _, c = _bounds_center_extents(mesh)
     if anchor == "top":
@@ -121,8 +218,7 @@ def _frame_from_normal(normal: np.ndarray) -> np.ndarray:
     """
     n = np.asarray(normal, dtype=float)
     n /= max(1e-9, np.linalg.norm(n))
-    # rotar Z -> n
-    R = trimesh.geometry.align_vectors(np.array([0, 0, 1.0]), n)
+    R = trimesh.geometry.align_vectors(np.array([0.0, 0.0, 1.0]), n)
     if R is None:
         R = np.eye(4)
     return R
@@ -138,8 +234,7 @@ def _place_text_on_face(
 ) -> trimesh.Trimesh:
     """
     Coloca y orienta el sólido de texto sobre la cara (anchor) del 'base'.
-    'pos' son mm en el plano tangente (x=lado, y=arriba dentro del plano de texto).
-    Para evitar z-fighting, aplicamos un pequeño offset normal.
+    'pos' son mm en el plano tangente (u,v).
     """
     origin, normal = _axis_from_anchor(base, anchor)
     R = _frame_from_normal(normal)
@@ -149,15 +244,16 @@ def _place_text_on_face(
     v = R[:3, 1]
     n = R[:3, 2]
 
-    # Offset normal: si es relieve, lo sacamos; si es grabado, lo metemos
-    n_clear = 0.05  # 0.05 mm para evitar coplanar
+    # Offset normal pequeño para evitar z-fighting
+    n_clear = 0.05  # 0.05 mm
     offset_n = (depth * 0.5 + n_clear) * (1.0 if mode == "emboss" else -1.0)
 
-    T = np.eye(4)
-    # colócalo en el origen del anclaje
-    T[:3, 3] = origin + u * float(pos[0]) + v * float(pos[1]) + n * float(offset_n)
+    px, py, pz = float(pos[0]), float(pos[1]), float(pos[2] if len(pos) > 2 else 0.0)
 
-    M = T @ R  # primero rota el texto (XY->plano), luego traslada
+    T = np.eye(4)
+    T[:3, 3] = origin + u * px + v * py + n * (offset_n + pz)
+
+    M = T @ R  # primero rota (XY→plano), luego traslada
 
     tm = text_mesh.copy()
     tm.apply_transform(M)
@@ -167,7 +263,7 @@ def _place_text_on_face(
 def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         from trimesh.boolean import union
-        res = union([a, b], engine=None)  # deja que escoja motor disponible
+        res = union([a, b], engine=None)
         if isinstance(res, trimesh.Trimesh) and len(res.vertices):
             return res
     except Exception:
@@ -194,13 +290,13 @@ def apply_text_ops(
     Aplica una lista de operaciones de texto.
       op = {
         "text": "VESA",
-        "size": 6,              # altura del texto (mm)
+        "size": 8,              # altura texto (mm)
         "depth": 1.2,           # extrusión (mm)
         "mode": "engrave"|"emboss",
         "pos": [x_mm, y_mm, 0], # desplazamiento en el plano anclado
-        "rot": [0,0,0],         # (no usado: la orientación la da el anchor)
-        "font": "DejaVuSans.ttf" | None,
-        "anchor": "front"|"back"|"left"|"right"|"top"|"bottom"   # NUEVO
+        "rot": [0,0,0],         # (no usado)
+        "font": "/ruta/DejaVuSans.ttf" | "DejaVu Sans" | None,
+        "anchor": "front"|"back"|"left"|"right"|"top"|"bottom"
       }
     """
     out = base_mesh.copy()
@@ -210,8 +306,15 @@ def apply_text_ops(
         if not text:
             continue
 
-        size = float(op.get("size", 6.0))
-        depth = float(op.get("depth", 1.2))
+        try:
+            size = float(op.get("size", 8.0))
+        except Exception:
+            size = 8.0
+        try:
+            depth = float(op.get("depth", 1.2))
+        except Exception:
+            depth = 1.2
+
         mode = str(op.get("mode", "engrave")).lower().strip()
         font = op.get("font") or None
         pos = op.get("pos") or [0, 0, 0]
@@ -219,7 +322,7 @@ def apply_text_ops(
             px, py, pz = float(pos[0]), float(pos[1]), float(pos[2] if len(pos) > 2 else 0.0)
         except Exception:
             px, py, pz = 0.0, 0.0, 0.0
-        anchor: Anchor = op.get("anchor") or "front"  # por defecto frente
+        anchor: Anchor = (op.get("anchor") or "front")  # default frente
 
         solid = _make_text_solid(text=text, height=size, depth=depth, font=font)
         if not isinstance(solid, trimesh.Trimesh) or len(solid.vertices) == 0:
@@ -231,16 +334,14 @@ def apply_text_ops(
         )
 
         if mode == "emboss":
-            # Intentar unión booleana; si falla, concatenamos (queda "pegado" pero visible)
             merged = _boolean_union(out, placed)
             out = merged if merged is not None else _concat([out, placed])
         else:
-            # Grabado: probar diferencia booleana; si falla, mantenemos sin grabar
             carved = _boolean_diff(out, placed)
             if carved is not None:
                 out = carved
             else:
-                # Fallback: si no hay motor booleano disponible, al menos deja el relieve
+                # Fallback: si no hay motor booleano, al menos deja el relieve
                 out = _concat([out, placed])
 
     return out
