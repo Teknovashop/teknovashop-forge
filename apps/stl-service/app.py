@@ -58,7 +58,6 @@ class TextOp(BaseModel):
     pos: list[float] = Field(default_factory=lambda: [0, 0, 0])
     rot: list[float] = Field(default_factory=lambda: [0, 0, 0])
     font: Optional[str] = None
-    # NUEVO: anclaje a cara de la pieza
     anchor: Optional[Literal["top", "bottom", "front", "back", "left", "right"]] = "front"
 
 class GenerateBody(BaseModel):
@@ -119,10 +118,6 @@ def _num(x: Any) -> Optional[float]:
         return None
 
 def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
-    """
-    Convierte dicts en [(x,y,diam)] descartando inválidos.
-    Soporta claves: diam_mm, diameter_mm, diameter, d
-    """
     out: List[tuple] = []
     if not holes:
         return out
@@ -203,7 +198,7 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
             return fn(*args)
     return fn(params)
 
-# ------------ Fallback: autocargar builder si no está en REGISTRY ------------
+# ------------ Auto-carga de builders ------------
 
 def _lazy_load_builder(slug_snake: str) -> None:
     if not slug_snake or slug_snake in REGISTRY:
@@ -232,7 +227,7 @@ def _lazy_load_builder(slug_snake: str) -> None:
         print(f"[FORGE][lazy] ERROR autocargando builder '{slug_snake}'", file=sys.stderr)
         traceback.print_exc()
 
-# ------------ Adaptadores de slugs del UI a builders reales ------------------
+# ------------ Adaptadores de slugs ------------
 
 def _val(params: Dict[str, Any], *keys: str, default: Optional[float] = None) -> Optional[float]:
     for k in keys:
@@ -289,7 +284,6 @@ ADAPTERS: Dict[str, ParamAdapter] = {
 
 _supabase_db = None
 def _db():
-    """Cliente supabase (service key)."""
     global _supabase_db
     if _supabase_db is None:
         from supabase import create_client
@@ -299,19 +293,12 @@ def _db():
     return _supabase_db
 
 def _is_entitled(user_id: str, slug_like: str) -> bool:
-    """
-    Soporta esquemas:
-    - entitlements(model_slug text, kind text, [expires_at timestamptz?])
-    - entitlements(slug text,       kind text, [expires_at timestamptz?])
-    Coincide por snake, kebab o '*'.
-    """
     if not user_id or not slug_like:
         return False
 
     snake = _norm_slug_for_builder(slug_like)
     kebab = _slug_for_storage(snake)
 
-    # 1) intenta con model_slug
     for col in ("model_slug", "slug"):
         try:
             sel = f"id,{col},kind,expires_at"
@@ -381,11 +368,9 @@ def debug_models():
 
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
-    # 0) userId (header tiene prioridad)
     hdr_uid = request.headers.get("x-user-id") or request.headers.get("x-user")
     user_id = (hdr_uid or body.user_id or "").strip() or None
 
-    # 1) Slug + adaptación
     raw_slug = (body.slug or body.model or "").strip()
     incoming_params = dict(body.params or {})
 
@@ -404,13 +389,11 @@ def generate(body: GenerateBody, request: Request):
     if not builder_slug or builder_slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{builder_slug}' not found")
 
-    # 2) Gate de negocio ANTES de construir
     _require_entitlement_or_402(user_id, builder_slug)
 
     storage_slug = _slug_for_storage(builder_slug)
     builder = REGISTRY[builder_slug]
 
-    # 3) Params + agujeros
     if "round_mm" in params and "fillet_mm" not in params:
         try:
             params["fillet_mm"] = float(params["round_mm"])
@@ -418,7 +401,6 @@ def generate(body: GenerateBody, request: Request):
             pass
     params["holes"] = _normalize_holes(body.holes)
 
-    # 4) Construcción
     try:
         result = builder(params)
     except TypeError:
@@ -429,7 +411,6 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # 5) Texto (best-effort)
     _applier = None
     try:
         from models import apply_text_ops as _applier
@@ -445,22 +426,17 @@ def generate(body: GenerateBody, request: Request):
         try:
             result = _applier(result, [op.dict() for op in body.text_ops])
         except Exception:
-            # nunca romper la pieza por el texto
             pass
 
-    # 6) STL -> bytes
     stl_bytes, maybe_name = _as_stl_bytes(result)
     filename = maybe_name or "forge-output.stl"
     object_path = f"{storage_slug}/{filename}"
 
-    # 7) Subir
     try:
         out = upload_and_get_url(stl_bytes, object_path)
         return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
-
-# -------------------------- Mantenimiento (opcional) --------------------------
 
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
