@@ -9,6 +9,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 
+import trimesh
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -345,7 +346,7 @@ def health():
         "ok": True,
         "service": "forge-stl",
         "origins": origins,
-        "loaded_models": sorted(list(REGISTRY.keys()])),
+        "loaded_models": sorted(list(REGISTRY.keys())),  # <- FIX aquí
         "aliases_count": len(ALIASES),
         "adapters": sorted(list(ADAPTERS.keys())),
         "require_entitlement": REQUIRE_ENTITLEMENT,
@@ -415,7 +416,6 @@ def generate(body: GenerateBody, request: Request):
     fmt = (request.query_params.get("fmt") or "").strip().lower()
     if fmt == "glb":
         try:
-            # Función para colocar texto como mallas separadas
             place_layers = None
             try:
                 from models.text_ops import place_text_layers as place_layers
