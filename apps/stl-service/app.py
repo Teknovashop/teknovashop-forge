@@ -345,7 +345,7 @@ def health():
         "ok": True,
         "service": "forge-stl",
         "origins": origins,
-        "loaded_models": sorted(list(REGISTRY.keys())),
+        "loaded_models": sorted(list(REGISTRY.keys()])),
         "aliases_count": len(ALIASES),
         "adapters": sorted(list(ADAPTERS.keys())),
         "require_entitlement": REQUIRE_ENTITLEMENT,
@@ -411,6 +411,48 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
+    # --------- PREVIEW A COLOR (GLB) ---------
+    fmt = (request.query_params.get("fmt") or "").strip().lower()
+    if fmt == "glb":
+        try:
+            # Función para colocar texto como mallas separadas
+            place_layers = None
+            try:
+                from models.text_ops import place_text_layers as place_layers
+            except Exception:
+                try:
+                    from models import place_text_layers as place_layers
+                except Exception:
+                    place_layers = None
+
+            texts = []
+            if place_layers and body.text_ops:
+                texts = place_layers(result, [op.dict() for op in (body.text_ops or [])])
+
+            from trimesh.visual import ColorVisuals
+            base = result.copy()
+            base.visual = ColorVisuals(base, face_colors=[210, 210, 210, 255])  # gris claro
+
+            for t in texts:
+                t.visual = ColorVisuals(t, face_colors=[0, 120, 255, 255])       # azul
+
+            scene = trimesh.Scene()
+            scene.add_geometry(base, node_name="base")
+            for i, t in enumerate(texts):
+                scene.add_geometry(t, node_name=f"text_{i}")
+
+            buf = io.BytesIO()
+            scene.export(file_obj=buf, file_type="glb")
+            glb_bytes = buf.getvalue()
+
+            filename = "forge-preview.glb"
+            object_path = f"{storage_slug}/{filename}"
+            out = upload_and_get_url(glb_bytes, object_path)
+            return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
+        except Exception as e:
+            print("[FORGE][GLB] error:", e)  # fallback a STL normal
+
+    # --------- STL final (con booleanos de texto) ---------
     _applier = None
     try:
         from models import apply_text_ops as _applier
