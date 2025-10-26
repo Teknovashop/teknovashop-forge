@@ -431,3 +431,40 @@ def apply_text_ops(
             out = carved if carved is not None else _concat([out, placed])
 
     return out
+
+
+# ------------------------ CAPA: Preview a color (GLB) ------------------------ #
+
+def place_text_layers(
+    base_mesh: trimesh.Trimesh,
+    ops: Iterable[Mapping],
+) -> List[trimesh.Trimesh]:
+    """
+    Coloca las mallas de texto SIN booleanos (para preview/GLB a color).
+    Devuelve la lista de mallas de texto ya posicionadas.
+    """
+    layers: List[trimesh.Trimesh] = []
+    for op in ops or []:
+        text = (op.get("text") or "").strip()
+        if not text:
+            continue
+        size = float(op.get("size", 6.0))
+        depth = float(op.get("depth", 1.2))
+        mode = str(op.get("mode", "emboss")).lower().strip()  # por defecto, en relieve
+        font = op.get("font") or None
+        pos = op.get("pos") or [0, 0, 0]
+        try:
+            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2] if len(pos) > 2 else 0.0)
+        except Exception:
+            px, py, pz = 0.0, 0.0, 0.0
+        anchor: Anchor = op.get("anchor") or "front"
+
+        solid = _make_text_solid(text=text, height=size, depth=depth, font_spec=font)
+        if not isinstance(solid, trimesh.Trimesh) or len(solid.vertices) == 0:
+            continue
+
+        placed = _place_text_on_face(
+            text_mesh=solid, base=base_mesh, anchor=anchor, pos=(px, py, pz), depth=depth, mode=mode
+        )
+        layers.append(placed)
+    return layers
