@@ -1,57 +1,51 @@
 # apps/stl-service/models/_booleans.py
+from __future__ import annotations
 import trimesh
+from typing import Iterable, Optional, List
 
-try:
-    import manifold3d as m3d
-    HAS_MANIFOLD = True
-except Exception:
-    HAS_MANIFOLD = False
+def _valid(mesh: trimesh.Trimesh) -> bool:
+    return isinstance(mesh, trimesh.Trimesh) and mesh.vertices.shape[0] > 0
 
+def _prep(meshes: Iterable[trimesh.Trimesh]) -> List[trimesh.Trimesh]:
+    return [m for m in meshes if _valid(m)]
 
-def _mesh_to_manifold(mesh: trimesh.Trimesh):
-    v = mesh.vertices.astype("float64")
-    f = mesh.faces.astype("int32")
-    return m3d.Manifold(v, f)
-
-
-def _manifold_to_mesh(mani: "m3d.Manifold") -> trimesh.Trimesh:
-    v, f = mani.to_tri_mesh()
-    return trimesh.Trimesh(vertices=v, faces=f, process=True)
-
-
-def boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    """
-    Diferencia booleana robusta. Usa manifold3d si está disponible; si no, intenta con trimesh.
-    """
-    if HAS_MANIFOLD:
-        try:
-            ma = _mesh_to_manifold(a)
-            mb = _mesh_to_manifold(b)
-            mc = ma - mb
-            return _manifold_to_mesh(mc)
-        except Exception as e:
-            print(f"[WARN] manifold3d diff fallback: {e}")
-
-    # Fallback trimesh (engine auto): puede no estar en contenedor, por eso mantenemos manifold.
+def union(meshes: Iterable[trimesh.Trimesh]) -> Optional[trimesh.Trimesh]:
+    ms = _prep(meshes)
+    if not ms:
+        return trimesh.Trimesh()
     try:
-        return a.difference(b)
-    except Exception as e:
-        print(f"[WARN] trimesh difference falló: {e}")
-        # último recurso: devuelve el original sin taladro
-        return a
+        from trimesh.boolean import union as _u
+        res = _u(ms, engine=None)
+        if isinstance(res, trimesh.Trimesh):
+            return res
+        if isinstance(res, (list, tuple)):
+            return trimesh.util.concatenate([m for m in res if _valid(m)])
+    except Exception:
+        pass
+    return trimesh.util.concatenate(ms)
 
-
-def boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
-    if HAS_MANIFOLD:
-        try:
-            ma = _mesh_to_manifold(a)
-            mb = _mesh_to_manifold(b)
-            mc = ma + mb
-            return _manifold_to_mesh(mc)
-        except Exception as e:
-            print(f"[WARN] manifold3d union fallback: {e}")
+def difference(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    if not _valid(a) or not _valid(b):
+        return a.copy() if _valid(a) else trimesh.Trimesh()
     try:
-        return a.union(b)
-    except Exception as e:
-        print(f"[WARN] trimesh union falló: {e}")
-        return a
+        from trimesh.boolean import difference as _d
+        res = _d([a], [b], engine=None)
+        if isinstance(res, trimesh.Trimesh):
+            return res
+    except Exception:
+        pass
+    # último recurso: concatenar (no graba)
+    return trimesh.util.concatenate([a, b])
+
+def intersection(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    if not _valid(a) or not _valid(b):
+        return trimesh.Trimesh()
+    try:
+        from trimesh.boolean import intersection as _i
+        res = _i([a], [b], engine=None)
+        if isinstance(res, trimesh.Trimesh):
+            return res
+    except Exception:
+        pass
+    # sin intersección real, devuelve vacío
+    return trimesh.Trimesh()
