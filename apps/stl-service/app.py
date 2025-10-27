@@ -19,11 +19,12 @@ from models import REGISTRY, ALIASES  # registro dinámico + alias para slugs
 from supabase_client import upload_and_get_url  # subida + URL firmada
 
 # -------------------------------------------------------------------
-# Parches de compatibilidad (evitan errores comunes sin romper nada)
+# Parches de compatibilidad (no rompen nada y evitan errores comunes)
 # -------------------------------------------------------------------
 
 # 1) Compat: algunos modelos antiguos llaman .apply_rotation(matriz)
 if not hasattr(trimesh.Trimesh, "apply_rotation"):
+
     def _apply_rotation(self, matrix):
         import numpy as _np
         M = _np.eye(4, dtype=float)
@@ -38,10 +39,11 @@ if not hasattr(trimesh.Trimesh, "apply_rotation"):
             except Exception:
                 pass
         self.apply_transform(M)
+
     trimesh.Trimesh.apply_rotation = _apply_rotation  # monkey-patch
 
 
-# 2) Shim: modelos que usan trimesh.interfaces.scad en entornos sin SCAD
+# 2) Shim: modelos que usan trimesh.interfaces.scad (OpenSCAD) en entornos sin SCAD
 def _normalize_mesh_list(args):
     lst = []
     for a in args:
@@ -55,6 +57,7 @@ def _normalize_mesh_list(args):
             lst.append(a)
     return lst
 
+
 def _scad_union(*args):
     meshes = _normalize_mesh_list(args)
     if not meshes:
@@ -63,7 +66,9 @@ def _scad_union(*args):
         from trimesh.boolean import union as _U
         return _U(meshes, engine=None)
     except Exception:
+        # último recurso: concat (no booleano real, pero no peta)
         return trimesh.util.concatenate(meshes)
+
 
 def _scad_difference(a, *rest):
     A = _normalize_mesh_list([a])
@@ -76,6 +81,7 @@ def _scad_difference(a, *rest):
     except Exception:
         return None
 
+
 def _scad_intersection(*args):
     meshes = _normalize_mesh_list(args)
     if len(meshes) < 2:
@@ -85,6 +91,7 @@ def _scad_intersection(*args):
         return _I(meshes, engine=None)
     except Exception:
         return None
+
 
 def _scad_boolean(meshes, operation='union'):
     op = (operation or 'union').lower()
@@ -97,6 +104,7 @@ def _scad_boolean(meshes, operation='union'):
     if op.startswith('i'):
         return _scad_intersection(meshes)
     return None
+
 
 try:
     import trimesh.interfaces as _ifc
@@ -118,6 +126,7 @@ def _split_origins(s: Optional[str]) -> list[str]:
     if not s:
         return []
     return [x.strip() for x in s.split(",") if x.strip()]
+
 
 CORS_ALLOW = os.getenv("CORS_ALLOW_ORIGINS", "")
 origins = _split_origins(CORS_ALLOW) or ["*"]
@@ -156,6 +165,7 @@ class TextOp(BaseModel):
     font: Optional[str] = None
     anchor: Optional[Literal["top", "bottom", "front", "back", "left", "right"]] = "front"
 
+
 class GenerateBody(BaseModel):
     slug: str                     # requerido por los builders (snake o kebab)
     params: Dict[str, Any] = Field(default_factory=dict)
@@ -163,6 +173,7 @@ class GenerateBody(BaseModel):
     text_ops: Optional[list[TextOp]] = None
     model: Optional[str] = None   # compat
     user_id: Optional[str] = None # <-- para el gate
+
 
 # -------------------------- Helpers --------------------------
 
@@ -173,8 +184,10 @@ def _norm_slug_for_builder(s: str) -> str:
     snake = raw.replace("-", "_")
     return ALIASES.get(raw, ALIASES.get(snake, snake))
 
+
 def _slug_for_storage(s: str) -> str:
     return (s or "").strip().lower().replace("_", "-")
+
 
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(obj, (bytes, bytearray)):
@@ -203,6 +216,7 @@ def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
                 continue
     raise TypeError("Builder returned unsupported type for STL export")
 
+
 def _num(x: Any) -> Optional[float]:
     if x is None:
         return None
@@ -212,6 +226,7 @@ def _num(x: Any) -> Optional[float]:
         return float(str(x).replace(",", "."))
     except Exception:
         return None
+
 
 def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
     out: List[tuple] = []
@@ -228,6 +243,7 @@ def _normalize_holes(holes: Optional[Iterable[Dict[str, Any]]]) -> List[tuple]:
         out.append((x, y, d))
     return out
 
+
 _ALIAS_KEYS: Dict[str, List[str]] = {
     "L": ["length_mm", "length", "l"],
     "W": ["width_mm", "width", "w"],
@@ -237,6 +253,7 @@ _ALIAS_KEYS: Dict[str, List[str]] = {
     "holes": ["holes"],
     "text": ["text", "label", "text_ops"],
 }
+
 
 def _get_param_from_aliases(params: Dict[str, Any], name: str) -> Any:
     if name in params:
@@ -257,6 +274,7 @@ def _get_param_from_aliases(params: Dict[str, Any], name: str) -> Any:
         if alias in params:
             return params[alias]
     return None
+
 
 def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
     try:
@@ -294,6 +312,7 @@ def _call_builder_compat(fn: Any, params: Dict[str, Any]) -> Any:
             return fn(*args)
     return fn(params)
 
+
 # ------------ Auto-carga de builders ------------
 
 def _lazy_load_builder(slug_snake: str) -> None:
@@ -323,6 +342,7 @@ def _lazy_load_builder(slug_snake: str) -> None:
         print(f"[FORGE][lazy] ERROR autocargando builder '{slug_snake}'", file=sys.stderr)
         traceback.print_exc()
 
+
 # ------------ Adaptadores de slugs ------------
 
 def _val(params: Dict[str, Any], *keys: str, default: Optional[float] = None) -> Optional[float]:
@@ -332,7 +352,9 @@ def _val(params: Dict[str, Any], *keys: str, default: Optional[float] = None) ->
             return v
     return default
 
+
 ParamAdapter = Callable[[Dict[str, Any]], Tuple[str, Dict[str, Any]]]
+
 
 def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return (
@@ -345,6 +367,7 @@ def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         },
     )
 
+
 def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     # Defaults "realistas" para bandeja: 400x200x70, pared 4mm
     return (
@@ -356,6 +379,7 @@ def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             "wall":   _val(p, "thickness_mm", "thickness", default=4),
         },
     )
+
 
 def _adapt_phone_dock(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return (
@@ -371,11 +395,13 @@ def _adapt_phone_dock(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         },
     )
 
+
 ADAPTERS: Dict[str, ParamAdapter] = {
     "tablet_stand":  _adapt_tablet_stand,
     "monitor_stand": _adapt_monitor_stand,
     "phone_dock":    _adapt_phone_dock,
 }
+
 
 # ---------------- Licencias / Entitlements ----------------
 
@@ -388,6 +414,7 @@ def _db():
             raise RuntimeError("Supabase ENV vars missing")
         _supabase_db = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     return _supabase_db
+
 
 def _is_entitled(user_id: str, slug_like: str) -> bool:
     if not user_id or not slug_like:
@@ -422,6 +449,7 @@ def _is_entitled(user_id: str, slug_like: str) -> bool:
                 return True
     return False
 
+
 def _require_entitlement_or_402(user_id: Optional[str], slug: str):
     kebab = _slug_for_storage(_norm_slug_for_builder(slug))
     if kebab in FORGE_FREE_SLUGS:
@@ -433,6 +461,7 @@ def _require_entitlement_or_402(user_id: Optional[str], slug: str):
             status_code=402,
             detail=f"Payment required for model '{kebab}'. Inicia sesión y compra/activa tu licencia."
         )
+
 
 # -------------------------- Endpoints --------------------------
 
@@ -449,6 +478,7 @@ def health():
         "free_slugs": sorted(list(FORGE_FREE_SLUGS)),
     }
 
+
 @app.get("/debug/models")
 def debug_models():
     sample = {}
@@ -463,11 +493,14 @@ def debug_models():
         "adapters": sorted(list(ADAPTERS.keys())),
     }
 
+
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
+    # 0) userId (header tiene prioridad)
     hdr_uid = request.headers.get("x-user-id") or request.headers.get("x-user")
     user_id = (hdr_uid or body.user_id or "").strip() or None
 
+    # 1) Slug + adaptación
     raw_slug = (body.slug or body.model or "").strip()
     incoming_params = dict(body.params or {})
 
@@ -486,11 +519,13 @@ def generate(body: GenerateBody, request: Request):
     if not builder_slug or builder_slug not in REGISTRY:
         raise HTTPException(status_code=404, detail=f"Model '{builder_slug}' not found")
 
+    # 2) Gate de negocio
     _require_entitlement_or_402(user_id, builder_slug)
 
     storage_slug = _slug_for_storage(builder_slug)
     builder = REGISTRY[builder_slug]
 
+    # 3) Params + agujeros
     if "round_mm" in params and "fillet_mm" not in params:
         try:
             params["fillet_mm"] = float(params["round_mm"])
@@ -498,6 +533,7 @@ def generate(body: GenerateBody, request: Request):
             pass
     params["holes"] = _normalize_holes(body.holes)
 
+    # 4) Construcción del modelo
     try:
         result = builder(params)
     except TypeError:
@@ -508,13 +544,13 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # --------- PREVIEW A COLOR (GLB) ---------
+    # 5) Preview a color (GLB) – capas de texto separadas
     fmt = (request.query_params.get("fmt") or "").strip().lower()
     if fmt == "glb":
         try:
             place_layers = None
             try:
-                from models.text_ops import place_text_layers as place_layers
+                from models.text_ops import place_text_layers as place_layers  # si existe
             except Exception:
                 try:
                     from models import place_text_layers as place_layers
@@ -523,6 +559,7 @@ def generate(body: GenerateBody, request: Request):
 
             texts = []
             if place_layers and body.text_ops:
+                # devuelve mallas de texto posicionadas SIN booleanos
                 texts = place_layers(result, [op.dict() for op in (body.text_ops or [])])
 
             from trimesh.visual import ColorVisuals
@@ -546,9 +583,9 @@ def generate(body: GenerateBody, request: Request):
             out = upload_and_get_url(glb_bytes, object_path)
             return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
         except Exception as e:
-            print("[FORGE][GLB] error:", e)  # fallback a STL normal
+            print("[FORGE][GLB] error:", e)  # sigue a STL normal
 
-    # --------- STL final (con booleanos de texto) ---------
+    # 6) Texto final (booleanos) – best-effort
     _applier = None
     try:
         from models import apply_text_ops as _applier
@@ -566,6 +603,7 @@ def generate(body: GenerateBody, request: Request):
         except Exception:
             pass
 
+    # 7) STL -> bytes y subir
     stl_bytes, maybe_name = _as_stl_bytes(result)
     filename = maybe_name or "forge-output.stl"
     object_path = f"{storage_slug}/{filename}"
@@ -575,6 +613,9 @@ def generate(body: GenerateBody, request: Request):
         return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
+
+
+# -------------------------- Mantenimiento --------------------------
 
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
