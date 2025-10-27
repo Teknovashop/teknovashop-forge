@@ -19,7 +19,7 @@ from models import REGISTRY, ALIASES  # registro dinámico + alias para slugs
 from supabase_client import upload_and_get_url  # subida + URL firmada
 
 # -------------------------------------------------------------------
-# Parches de compatibilidad (no rompen nada y evitan errores comunes)
+# Parches de compatibilidad (evitan errores comunes sin romper nada)
 # -------------------------------------------------------------------
 
 # 1) Compat: algunos modelos antiguos llaman .apply_rotation(matriz)
@@ -40,7 +40,8 @@ if not hasattr(trimesh.Trimesh, "apply_rotation"):
         self.apply_transform(M)
     trimesh.Trimesh.apply_rotation = _apply_rotation  # monkey-patch
 
-# 2) Shim: modelos que usan trimesh.interfaces.scad (OpenSCAD) en entornos sin SCAD
+
+# 2) Shim: modelos que usan trimesh.interfaces.scad en entornos sin SCAD
 def _normalize_mesh_list(args):
     lst = []
     for a in args:
@@ -62,7 +63,6 @@ def _scad_union(*args):
         from trimesh.boolean import union as _U
         return _U(meshes, engine=None)
     except Exception:
-        # último recurso: concat (no booleano real, pero no peta)
         return trimesh.util.concatenate(meshes)
 
 def _scad_difference(a, *rest):
@@ -110,6 +110,7 @@ try:
 except Exception:
     # si falla, seguimos; los modelos que no lo usan no se afectan
     pass
+
 
 # -------------------------- Config & App --------------------------
 
