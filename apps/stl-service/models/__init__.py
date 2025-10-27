@@ -1,4 +1,3 @@
-
 """
 Autodiscovery de builders de FORGE.
 
@@ -13,8 +12,8 @@ las siguientes reglas (en orden):
 
 Además se añaden alias “humanos” frecuentes al final.
 """
-
 from __future__ import annotations
+
 from typing import Callable, Dict, Iterable
 import importlib
 import pkgutil
@@ -24,6 +23,7 @@ import pkgutil
 REGISTRY: Dict[str, Callable] = {}
 ALIASES: Dict[str, str] = {}
 
+
 def _register(name_snake: str, fn: Callable) -> None:
     """Registra el callable y crea alias básicos snake/kebab."""
     key = name_snake.lower()
@@ -31,6 +31,7 @@ def _register(name_snake: str, fn: Callable) -> None:
     # Alias identidad y kebab
     ALIASES.setdefault(key, key)
     ALIASES.setdefault(key.replace("_", "-"), key)
+
 
 def _add_alias(raw_slug: str, target_snake: str) -> None:
     """Añade alias sin pisar entradas existentes."""
@@ -40,7 +41,7 @@ def _add_alias(raw_slug: str, target_snake: str) -> None:
     snake = target_snake.strip().lower()
     kebab = snake.replace("_", "-")
     ALIASES.setdefault(raw, snake)
-    # también su forma kebab por si llega en snake
+    # también su forma kebab/snake equivalente
     if "_" in raw:
         ALIASES.setdefault(raw.replace("_", "-"), snake)
     else:
@@ -48,11 +49,13 @@ def _add_alias(raw_slug: str, target_snake: str) -> None:
     # asegúrate de que kebab->snake está
     ALIASES.setdefault(kebab, snake)
 
+
 # --------------------- Descubrimiento de módulos ---------------------
 
 # Explora módulos de primer nivel en `models/`
 for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
-    if _ispkg or _name in {"__init__", "text", "text_ops", "_helpers", "common"}:
+    # evitar subpaquetes y helpers
+    if _ispkg or _name in {"__init__", "text", "text_ops", "_helpers", "common", "geom", "__pycache__"}:
         continue
 
     try:
@@ -92,13 +95,14 @@ for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
             _add_alias(s, _name)
 
 # --------------------- Alias “humanos” adicionales -------------------
-
+# (kebab y snake, inglés y español, según tus modelos)
 _extra = {
+    # Básicos
     "vesa-adapter": "vesa_adapter",
     "router-mount": "router_mount",
     "cable-tray": "cable_tray",
     "tablet-stand": "tablet_stand",
-    "monitor-stand": "monitor_stand",
+    "monitor-stand": "monitor_stand",   # se adapta a cable_tray en app.py
     "ssd-holder": "ssd_holder",
     "raspi-case": "raspi_case",
     "go-pro-mount": "go_pro_mount",
@@ -110,7 +114,7 @@ _extra = {
     "phone-dock": "phone_dock",
     "hub-holder": "hub_holder",
     "cable-clip": "cable_clip",
-    # por si llegan en snake ya “humanos”
+    # En snake “humanos”
     "tablet_stand": "tablet_stand",
     "monitor_stand": "monitor_stand",
     "phone_dock": "phone_dock",
@@ -118,6 +122,31 @@ _extra = {
     "hub_holder": "hub_holder",
     "go_pro_mount": "go_pro_mount",
     "mic_arm_clip": "mic_arm_clip",
+    # Alias en español
+    "adaptador_vesa": "vesa_adapter",
+    "bandeja_vesa": "vesa_shelf",
+    "soporte_router": "router_mount",
+    "bandeja_cables": "cable_tray",
+    "elevador_monitor": "monitor_stand",
+    "soporte_portatil": "laptop_stand",
+    "soporte_laptop": "laptop_stand",
+    "base_portatil": "laptop_stand",
+    "soporte_tablet": "tablet_stand",
+    "soporte_movil": "phone_stand",
+    "dock_movil": "phone_stand",
+    "dock_para_movil": "phone_stand",
+    "placa_camara": "camera_plate",
+    "gancho_pared": "wall_hook",
+    "bracket_pared": "wall_bracket",
+    "soporte_pared": "wall_bracket",
+    "soporte_hub": "hub_holder",
+    "anclaje_gopro": "go_pro_mount",
+    "caja_ip65": "enclosure_ip65",
+    "ip65_enclosure": "enclosure_ip65",
+    "carcasa_raspberry": "raspi_case",
+    "raspberry_case": "raspi_case",
+    "raspberry_pi_case": "raspi_case",
+    "soporte_ssd": "ssd_holder",
 }
 for k, v in _extra.items():
     _add_alias(k, v)
@@ -125,12 +154,14 @@ for k, v in _extra.items():
 # --------------------- Utilidad opcional de texto --------------------
 
 apply_text_ops = None  # type: ignore
+place_text_layers = None  # type: ignore
 for candidate in ("text", "text_ops"):
     try:
         m = importlib.import_module(f"{__name__}.{candidate}")
-        if hasattr(m, "apply_text_ops"):
+        if hasattr(m, "apply_text_ops") and apply_text_ops is None:
             apply_text_ops = getattr(m, "apply_text_ops")  # type: ignore
-            break
+        if hasattr(m, "place_text_layers") and place_text_layers is None:
+            place_text_layers = getattr(m, "place_text_layers")  # type: ignore
     except Exception:
         pass
 
@@ -144,4 +175,5 @@ def get_builder(slug_or_name: str):
     snake = ALIASES.get(raw, ALIASES.get(raw.replace("-", "_"), raw.replace("-", "_")))
     return REGISTRY.get(snake)
 
-__all__ = ["REGISTRY", "ALIASES", "get_builder", "apply_text_ops"]
+
+__all__ = ["REGISTRY", "ALIASES", "get_builder", "apply_text_ops", "place_text_layers"]
