@@ -11,7 +11,7 @@ try:
     import manifold3d as m3d  # pip: manifold3d
     _HAS_MF = True
 except Exception:
-    m3d = None
+    m3d = None  # type: ignore
     _HAS_MF = False
 
 
@@ -61,16 +61,12 @@ def parse_holes(holes_in: Iterable[Any]) -> List[Tuple[float, float, float]]:
 # ---------------------- Primitivas ----------------------
 
 def box(extents: Sequence[float]) -> trimesh.Trimesh:
-    """
-    Caja centrada en el origen. `extents=(L, W, T)` en mm.
-    """
+    """Caja centrada en el origen. `extents=(L, W, T)` en mm."""
     return trimesh.creation.box(extents=np.asarray(extents, dtype=float))
 
 
 def cylinder(radius: float, height: float, sections: int = 64) -> trimesh.Trimesh:
-    """
-    Cilindro centrado en el origen, eje Z, altura `height`.
-    """
+    """Cilindro centrado en el origen, eje Z, altura `height`."""
     r = float(radius)
     h = float(height)
     s = int(sections) if sections and sections > 3 else 32
@@ -131,7 +127,7 @@ def _to_mf(mesh: trimesh.Trimesh):
         f = np.asarray(mesh.faces, dtype=np.int32)
         if v.size == 0 or f.size == 0:
             return None
-        return m3d.Manifold.FromMesh(m3d.Mesh(v, f))
+        return m3d.Manifold.FromMesh(m3d.Mesh(v, f))  # type: ignore[attr-defined]
     except Exception:
         return None
 
