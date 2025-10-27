@@ -6,6 +6,7 @@ import inspect
 import importlib
 import sys
 import traceback
+import types
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 
@@ -16,6 +17,99 @@ from pydantic import BaseModel, Field
 
 from models import REGISTRY, ALIASES  # registro dinámico + alias para slugs
 from supabase_client import upload_and_get_url  # subida + URL firmada
+
+# -------------------------------------------------------------------
+# Parches de compatibilidad (no rompen nada y evitan errores comunes)
+# -------------------------------------------------------------------
+
+# 1) Compat: algunos modelos antiguos llaman .apply_rotation(matriz)
+if not hasattr(trimesh.Trimesh, "apply_rotation"):
+    def _apply_rotation(self, matrix):
+        import numpy as _np
+        M = _np.eye(4, dtype=float)
+        mat = _np.asarray(matrix, dtype=float)
+        if mat.shape == (4, 4):
+            M = mat
+        elif mat.shape == (3, 3):
+            M[:3, :3] = mat
+        else:
+            try:
+                M[:3, :3] = mat
+            except Exception:
+                pass
+        self.apply_transform(M)
+    trimesh.Trimesh.apply_rotation = _apply_rotation  # monkey-patch
+
+# 2) Shim: modelos que usan trimesh.interfaces.scad (OpenSCAD) en entornos sin SCAD
+def _normalize_mesh_list(args):
+    lst = []
+    for a in args:
+        if a is None:
+            continue
+        if isinstance(a, (list, tuple)):
+            for x in a:
+                if isinstance(x, trimesh.Trimesh):
+                    lst.append(x)
+        elif isinstance(a, trimesh.Trimesh):
+            lst.append(a)
+    return lst
+
+def _scad_union(*args):
+    meshes = _normalize_mesh_list(args)
+    if not meshes:
+        return None
+    try:
+        from trimesh.boolean import union as _U
+        return _U(meshes, engine=None)
+    except Exception:
+        # último recurso: concat (no booleano real, pero no peta)
+        return trimesh.util.concatenate(meshes)
+
+def _scad_difference(a, *rest):
+    A = _normalize_mesh_list([a])
+    B = _normalize_mesh_list(rest)
+    if not A:
+        return None
+    try:
+        from trimesh.boolean import difference as _D
+        return _D(A, B, engine=None)
+    except Exception:
+        return None
+
+def _scad_intersection(*args):
+    meshes = _normalize_mesh_list(args)
+    if len(meshes) < 2:
+        return None
+    try:
+        from trimesh.boolean import intersection as _I
+        return _I(meshes, engine=None)
+    except Exception:
+        return None
+
+def _scad_boolean(meshes, operation='union'):
+    op = (operation or 'union').lower()
+    if op.startswith('u'):
+        return _scad_union(meshes)
+    if op.startswith('d'):
+        if isinstance(meshes, (list, tuple)) and len(meshes) >= 2:
+            return _scad_difference(meshes[0], meshes[1:])
+        return None
+    if op.startswith('i'):
+        return _scad_intersection(meshes)
+    return None
+
+try:
+    import trimesh.interfaces as _ifc
+    if not hasattr(_ifc, "scad"):
+        _ifc.scad = types.SimpleNamespace(
+            boolean=_scad_boolean,
+            union=_scad_union,
+            difference=_scad_difference,
+            intersection=_scad_intersection,
+        )
+except Exception:
+    # si falla, seguimos; los modelos que no lo usan no se afectan
+    pass
 
 # -------------------------- Config & App --------------------------
 
@@ -251,6 +345,7 @@ def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     )
 
 def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    # Defaults "realistas" para bandeja: 400x200x70, pared 4mm
     return (
         "cable_tray",
         {
@@ -346,7 +441,7 @@ def health():
         "ok": True,
         "service": "forge-stl",
         "origins": origins,
-        "loaded_models": sorted(list(REGISTRY.keys())),  # <- FIX aquí
+        "loaded_models": sorted(list(REGISTRY.keys())),
         "aliases_count": len(ALIASES),
         "adapters": sorted(list(ADAPTERS.keys())),
         "require_entitlement": REQUIRE_ENTITLEMENT,
