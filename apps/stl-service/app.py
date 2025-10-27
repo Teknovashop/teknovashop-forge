@@ -576,6 +576,7 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
 
+
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
     token = request.headers.get("x-cleanup-token", "")
