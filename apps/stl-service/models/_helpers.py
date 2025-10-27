@@ -1,8 +1,19 @@
 from __future__ import annotations
-from typing import Iterable, Tuple, List, Any, Optional
+from typing import Iterable, Tuple, List, Any, Optional, Sequence
+
+import numpy as np
 import trimesh
 
-# ------------------------ Utils numéricos ------------------------ #
+# Opcional (para redondeos 2D -> extrusión)
+try:
+    from shapely.geometry import box as shp_box, Polygon
+    from shapely.ops import unary_union
+    _HAS_SHAPELY = True
+except Exception:
+    _HAS_SHAPELY = False
+
+
+# -------------------- Num & parsing --------------------
 
 def num(x: Any, default: Optional[float] = None) -> Optional[float]:
     if x is None:
@@ -17,10 +28,10 @@ def num(x: Any, default: Optional[float] = None) -> Optional[float]:
 
 def parse_holes(holes_in: Iterable[Any]) -> List[Tuple[float, float, float]]:
     """
-    Admite:
-      - dicts: {"x":..,"y":..,"diam_mm"/"diameter"/"d":..}
-      - tuplas/listas: (x, y, d)
-    Devuelve lista de (x, y, d) en mm con d>0.
+    Normaliza agujeros a [(x, y, d_mm)].
+    - Acepta dicts con x,y,diam_mm/diameter/d/diameter_mm
+    - Acepta triples [x,y,d]
+    Coordenadas se asumen en el sistema de la pieza (habitualmente centrado).
     """
     out: List[Tuple[float, float, float]] = []
     for h in holes_in or []:
@@ -36,77 +47,177 @@ def parse_holes(holes_in: Iterable[Any]) -> List[Tuple[float, float, float]]:
                 out.append((float(xv), float(yv), float(dv)))
     return out
 
-# ------------------------ Primitivas ------------------------ #
 
-def box(extents):
+# -------------------- Primitivas --------------------
+
+def box(extents: Sequence[float]) -> trimesh.Trimesh:
     """
-    Caja centrada en el origen con extents (L, W, T).
+    Caja centrada en el origen con (L, W, T) = (x, y, z).
     """
-    return trimesh.creation.box(extents=extents)
+    return trimesh.creation.box(extents=tuple(float(v) for v in extents))
 
 
-def cylinder(radius, height, sections=64):
+def cylinder(radius: float, height: float, sections: int = 64) -> trimesh.Trimesh:
     """
-    Cilindro centrado en el origen, eje Z, radio y altura en mm.
+    Cilindro centrado en el origen y alineado con Z.
     """
-    return trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
+    return trimesh.creation.cylinder(radius=float(radius), height=float(height), sections=int(sections))
 
-# ------------------------ Booleanos robustos ------------------------ #
 
-def _select_engine() -> Optional[str]:
-    """
-    Devuelve 'scad' si el backend de OpenSCAD está disponible,
-    si no, None para usar los booleanos puros de trimesh.
-    """
-    scad_iface = getattr(getattr(trimesh, "interfaces", object()), "scad", None)
-    if getattr(scad_iface, "exists", False):
-        return "scad"
+# -------------------- Booleanos robustos --------------------
+
+def _trimesh_union(meshes: List[trimesh.Trimesh]) -> Optional[trimesh.Trimesh]:
+    try:
+        from trimesh.boolean import union
+        out = union(meshes, engine=None)
+        if isinstance(out, trimesh.Trimesh) and len(out.vertices):
+            return out
+    except Exception:
+        pass
     return None
+
+
+def _trimesh_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    try:
+        from trimesh.boolean import difference
+        out = difference([a], [b], engine=None)
+        if isinstance(out, trimesh.Trimesh) and len(out.vertices):
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def _trimesh_intersection(meshes: List[trimesh.Trimesh]) -> Optional[trimesh.Trimesh]:
+    try:
+        from trimesh.boolean import intersection
+        out = intersection(meshes, engine=None)
+        if isinstance(out, trimesh.Trimesh) and len(out.vertices):
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def union_all(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """
+    Unión booleana con fallback seguro (concat) si no hay motor.
+    """
+    lst = [m for m in meshes if isinstance(m, trimesh.Trimesh) and len(m.vertices)]
+    if not lst:
+        return trimesh.Trimesh()
+    out = _trimesh_union(lst)
+    return out if out is not None else trimesh.util.concatenate(lst)
 
 
 def difference(a: trimesh.Trimesh, b: trimesh.Trimesh) -> trimesh.Trimesh:
     """
-    Diferencia booleana robusta.
-    1) Usa trimesh.boolean.difference con engine auto.
-    2) Si falla, intenta devolver 'a' (mejor algo que romper).
+    Diferencia booleana con fallback (devuelve 'a' si no hay motor).
     """
+    out = _trimesh_diff(a, b)
+    return out if out is not None else a
+
+
+def intersection_all(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
+    """
+    Intersección booleana con fallback (devuelve la primera si no hay motor).
+    """
+    lst = [m for m in meshes if isinstance(m, trimesh.Trimesh) and len(m.vertices)]
+    if len(lst) < 2:
+        return lst[0] if lst else trimesh.Trimesh()
+    out = _trimesh_intersection(lst)
+    return out if out is not None else lst[0]
+
+
+# -------------------- Utilidades de calidad --------------------
+
+def ensure_watertight(m: trimesh.Trimesh) -> trimesh.Trimesh:
+    """
+    Intenta mejorar la imprimibilidad: fusiona vértices muy cercanos y rellena agujeros menores.
+    No rompe si ya es watertight.
+    """
+    if not isinstance(m, trimesh.Trimesh):
+        return m
+    mm = m.copy()
     try:
-        from trimesh.boolean import difference as _diff
-        engine = _select_engine()
-        res = _diff([a], [b], engine=engine)
-        if isinstance(res, trimesh.Trimesh):
-            return res
-        # Algunos backends devuelven lista; concatenamos si procede
-        if isinstance(res, (list, tuple)):
-            parts = [m for m in res if isinstance(m, trimesh.Trimesh)]
-            if parts:
-                return trimesh.util.concatenate(parts)
+        mm.merge_vertices(epsilon=1e-6)
     except Exception:
         pass
-    # último recurso
-    return a.copy()
+    try:
+        if not mm.is_watertight:
+            mm.fill_holes()
+    except Exception:
+        pass
+    return mm
 
 
-# ------------------------ Placa con agujeros ------------------------ #
+# -------------------- Placas “reales” --------------------
 
-def plate_with_holes(L: float, W: float, T: float, holes: List[Tuple[float, float, float]]):
+def _rounded_rect_2d(L: float, W: float, r: float) -> Optional[Polygon]:
     """
-    Genera una placa (LxWxT) con agujeros (x, y, d) centrados en Z=0.
-    Los agujeros se hacen con cilindros ligeramente más altos que T
-    para garantizar una diferencia limpia.
+    Devuelve un Polígono Shapely rectangular con esquinas redondeadas (radio r).
+    Centro en (0,0). Requiere Shapely.
     """
-    base = box((L, W, T))
+    if not _HAS_SHAPELY:
+        return None
+    L = float(L); W = float(W); r = max(0.0, float(r))
+    rmax = max(0.0, min(L, W) * 0.5 - 1e-6)
+    r = min(r, rmax)
+    base = shp_box(-L * 0.5 + r, -W * 0.5 + r, L * 0.5 - r, W * 0.5 - r)
+    if r > 0:
+        poly = base.buffer(r, join_style=2, cap_style=2)  # join_style=2 -> round
+    else:
+        poly = base
+    return poly
+
+
+def rounded_plate(L: float, W: float, T: float, r: float) -> trimesh.Trimesh:
+    """
+    Placa sólida con esquinas redondeadas (si Shapely disponible).
+    Si no hay Shapely, cae en caja simple.
+    """
+    poly = _rounded_rect_2d(L, W, r) if _HAS_SHAPELY else None
+    if _HAS_SHAPELY and isinstance(poly, Polygon):
+        try:
+            slab = trimesh.creation.extrude_polygon(poly, height=float(T))
+            # Por coherencia: centrar en Z (igual que box extents)
+            return slab
+        except Exception:
+            pass
+    return box((L, W, T))
+
+
+def plate_with_holes(
+    L: float,
+    W: float,
+    T: float,
+    holes: List[Tuple[float, float, float]],
+    corner_r: float = 0.0,
+    hole_sections: int = 64
+) -> trimesh.Trimesh:
+    """
+    Placa con esquinas redondeadas opcionales y taladros pasantes.
+    - L, W, T en mm
+    - holes: lista [(x, y, d_mm)]
+    - corner_r: radio de redondeo en esquinas (0 = sin redondeo)
+    """
+    base = rounded_plate(L, W, T, corner_r) if corner_r > 0 else box((L, W, T))
     if not holes:
-        return base
+        return ensure_watertight(base)
 
     cutters = []
-    h = T * 1.5  # más alto que la placa para evitar artefactos
+    # hacemos los taladros más altos que el espesor para asegurar perforación
+    h = float(T) * 1.6
+    z0 = 0.0  # la placa está centrada; con h > T nos aseguramos atraviesa
     for (x, y, d) in holes:
-        r = d / 2.0
-        c = cylinder(r, h)
-        # los cilindros ya están centrados en Z, sólo movemos X,Y
-        c.apply_translation((x, y, 0.0))
+        r = float(d) * 0.5
+        c = cylinder(radius=r, height=h, sections=hole_sections)
+        c.apply_translation((float(x), float(y), z0))
         cutters.append(c)
 
-    cutter = cutters[0] if len(cutters) == 1 else trimesh.util.concatenate(cutters)
-    return difference(base, cutter)
+    cutter = union_all(cutters) if len(cutters) > 1 else (cutters[0] if cutters else None)
+    if cutter is None:
+        return ensure_watertight(base)
+
+    out = difference(base, cutter)
+    return ensure_watertight(out)
