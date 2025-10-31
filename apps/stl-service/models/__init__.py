@@ -102,7 +102,7 @@ _extra = {
     "router-mount": "router_mount",
     "cable-tray": "cable_tray",
     "tablet-stand": "tablet_stand",
-    "monitor-stand": "monitor_stand",   # se adapta a cable_tray en app.py
+    "monitor-stand": "monitor_stand",
     "ssd-holder": "ssd_holder",
     "raspi-case": "raspi_case",
     "go-pro-mount": "go_pro_mount",
@@ -148,8 +148,11 @@ _extra = {
     "raspberry_pi_case": "raspi_case",
     "soporte_ssd": "ssd_holder",
 }
+
+# Solo añadimos alias cuyo destino exista en REGISTRY (evita “nombres bonitos” → builder inexistente)
 for k, v in _extra.items():
-    _add_alias(k, v)
+    if v in REGISTRY:
+        _add_alias(k, v)
 
 # --------------------- Utilidad opcional de texto --------------------
 
