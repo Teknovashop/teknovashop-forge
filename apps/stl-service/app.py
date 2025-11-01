@@ -22,7 +22,7 @@ from supabase_client import upload_and_get_url  # subida + URL firmada
 # Parches de compatibilidad (evitan errores en modelos antiguos)
 # -------------------------------------------------------------------
 
-# 1) Algunos modelos llaman .apply_rotation(matrix) (no existe en últimas versiones)
+# 1) Compat: algunos modelos usan .apply_rotation(matrix)
 if not hasattr(trimesh.Trimesh, "apply_rotation"):
     def _apply_rotation(self, matrix):
         import numpy as _np
@@ -40,9 +40,7 @@ if not hasattr(trimesh.Trimesh, "apply_rotation"):
         self.apply_transform(M)
     trimesh.Trimesh.apply_rotation = _apply_rotation  # monkey-patch
 
-
-# 2) Algunos modelos usan trimesh.interfaces.scad. En contenedores suele no estar.
-#    Inyectamos un shim que usa trimesh.boolean o degradamos a concat.
+# 2) Compat: shim para trimesh.interfaces.scad (degrada a boolean nativo o concat)
 def _normalize_mesh_list(args):
     lst = []
     for a in args:
@@ -125,7 +123,7 @@ origins = _split_origins(CORS_ALLOW) or ["*"]
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
-CLEANUP_TOKEN = os.getenv("CLEANUP_TOKEN", "")  # para endpoint de mantenimiento
+CLEANUP_TOKEN = os.getenv("CLEANUP_TOKEN", "")  # mantenimiento
 
 # -------- Gate de negocio (env) ----------
 REQUIRE_ENTITLEMENT = os.getenv("FORGE_REQUIRE_ENTITLEMENT", "0") == "1"
@@ -134,6 +132,17 @@ FORGE_FREE_SLUGS = {
     for s in (os.getenv("FORGE_FREE_SLUGS", "") or "").split(",")
     if s.strip()
 }
+
+# -------- Catálogo/whitelist por entorno ----------
+def _whitelist() -> Optional[List[str]]:
+    raw = (os.getenv("FORGE_MODEL_WHITELIST", "") or "").strip()
+    if not raw:
+        return None
+    return [s.strip().lower().replace("-", "_") for s in raw.split(",") if s.strip()]
+
+def _is_enabled_by_whitelist(snake_slug: str) -> bool:
+    wl = _whitelist()
+    return True if wl is None else (snake_slug in wl)
 
 app = FastAPI(title="Teknovashop FORGE — STL Service")
 app.add_middleware(
@@ -162,7 +171,7 @@ class GenerateBody(BaseModel):
     holes: Optional[Iterable[Dict[str, Any]]] = None
     text_ops: Optional[list[TextOp]] = None
     model: Optional[str] = None   # compat
-    user_id: Optional[str] = None # <-- para el gate
+    user_id: Optional[str] = None # gate
 
 # -------------------------- Helpers --------------------------
 
@@ -346,7 +355,7 @@ def _adapt_tablet_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     )
 
 def _adapt_monitor_stand(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Defaults "realistas" para bandeja: 400x200x70, pared 4mm
+    # Defaults realistas para una bandeja: 400x200x70, pared 4mm
     return (
         "cable_tray",
         {
@@ -447,21 +456,17 @@ def health():
         "adapters": sorted(list(ADAPTERS.keys())),
         "require_entitlement": REQUIRE_ENTITLEMENT,
         "free_slugs": sorted(list(FORGE_FREE_SLUGS)),
+        "whitelist": _whitelist() or [],
     }
 
 @app.get("/debug/models")
 def debug_models():
-    sample = {}
-    for i, (k, v) in enumerate(ALIASES.items()):
-        if i >= 50:
-            break
-        sample[k] = v
-    return {
-        "models": sorted(list(REGISTRY.keys())),
-        "aliases_count": len(ALIASES),
-        "sample_aliases": sample,
-        "adapters": sorted(list(ADAPTERS.keys())),
-    }
+    wl = _whitelist()
+    keys = list(REGISTRY.keys())
+    if wl:
+        keys = [k for k in keys if k in wl]
+    # Responder en kebab-case para el front
+    return {"models": sorted([k.replace("_", "-") for k in keys])}
 
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
@@ -480,6 +485,11 @@ def generate(body: GenerateBody, request: Request):
     else:
         builder_slug = base_slug
         params = dict(incoming_params)
+
+    # Whitelist: si existe, sólo permite esos modelos
+    if not _is_enabled_by_whitelist(builder_slug):
+        keb = _slug_for_storage(builder_slug)
+        raise HTTPException(status_code=400, detail=f"Model '{keb}' is disabled")
 
     if builder_slug and builder_slug not in REGISTRY:
         _lazy_load_builder(builder_slug)
@@ -508,7 +518,7 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # --------- PREVIEW A COLOR (GLB) ---------
+    # --------- PREVIEW (GLB) opcional ---------
     fmt = (request.query_params.get("fmt") or "").strip().lower()
     if fmt == "glb":
         try:
@@ -527,10 +537,10 @@ def generate(body: GenerateBody, request: Request):
 
             from trimesh.visual import ColorVisuals
             base = result.copy()
-            base.visual = ColorVisuals(base, face_colors=[210, 210, 210, 255])  # gris claro
+            base.visual = ColorVisuals(base, face_colors=[210, 210, 210, 255])
 
             for t in texts:
-                t.visual = ColorVisuals(t, face_colors=[0, 120, 255, 255])       # azul
+                t.visual = ColorVisuals(t, face_colors=[0, 120, 255, 255])
 
             scene = trimesh.Scene()
             scene.add_geometry(base, node_name="base")
@@ -546,9 +556,9 @@ def generate(body: GenerateBody, request: Request):
             out = upload_and_get_url(glb_bytes, object_path)
             return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
         except Exception as e:
-            print("[FORGE][GLB] error:", e)  # fallback a STL normal
+            print("[FORGE][GLB] error:", e)
 
-    # --------- STL final (con booleanos de texto) ---------
+    # --------- STL final (con texto booleano si aplica) ---------
     _applier = None
     try:
         from models import apply_text_ops as _applier
@@ -575,7 +585,6 @@ def generate(body: GenerateBody, request: Request):
         return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload error: {e}")
-
 
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
