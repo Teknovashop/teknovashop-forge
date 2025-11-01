@@ -1,130 +1,132 @@
 # apps/stl-service/models/vesa_shelf.py
 # Estante VESA para mini-PC/NUC con quick-release básico (opcional)
-# Implementado con trimesh (sin cadquery) para no añadir dependencias.
-
+# Implementado con trimesh, evitando motores externos (OpenSCAD).
 from __future__ import annotations
-import math
-from typing import Dict, Any, Tuple, List
 
-import numpy as np
+from typing import Dict, Any, Tuple, List, Optional
 import trimesh
 
+# Booleanos tolerantes (sin engine="scad")
+from ._booleans import union as bool_union, difference as bool_difference
 
 DEFAULTS: Dict[str, Any] = {
-    "vesa": 100,            # 75 / 100 / 200
-    "thickness": 4.0,       # grueso placa y estante
-    "shelf_width": 180.0,   # ancho útil del estante
-    "shelf_depth": 120.0,   # fondo (sale hacia -Y en el STL)
-    "lip_height": 15.0,     # pestaña frontal anti-caída
-    "rib_count": 3,         # nº de refuerzos verticales
-    "hole_d": 5.0,          # taladros VESA
-    "qr_enabled": True,     # quick-release muy simple (ranura)
+    "vesa": 100.0,        # 75 / 100 / 200 (mm)
+    "thickness": 4.0,     # grosor de placa y estante (mm)
+    "shelf_width": 180.0, # ancho útil del estante (mm, eje X)
+    "shelf_depth": 120.0, # fondo del estante (mm, eje Y; se extiende hacia -Y)
+    "lip_height": 15.0,   # pestaña frontal anti-caída (mm)
+    "rib_count": 3,       # nº de refuerzos verticales (tabiques)
+    "hole_d": 5.0,        # diámetro taladros VESA (mm)
+    "qr_enabled": True,   # quick-release mediante ranura
     "qr_slot_w": 18.0,
     "qr_slot_h": 6.0,
-    "qr_offset_y": 12.0,
+    "qr_offset_y": 12.0,  # desplazamiento de la ranura en +Z respecto al centro de la placa
 }
 
-def _box(size_xyz: Tuple[float, float, float]) -> trimesh.Trimesh:
-    return trimesh.creation.box(extents=size_xyz)
+def _box(extents: Tuple[float, float, float]) -> trimesh.Trimesh:
+    return trimesh.creation.box(extents=extents)
 
 def _cyl(radius: float, height: float, sections: int = 64) -> trimesh.Trimesh:
     return trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
 
-def _translate(m: trimesh.Trimesh, x=0.0, y=0.0, z=0.0) -> trimesh.Trimesh:
-    m = m.copy()
-    m.apply_translation([x, y, z])
-    return m
-
-def _union(meshes: List[trimesh.Trimesh]) -> trimesh.Trimesh:
-    meshes = [m for m in meshes if m is not None]
-    if not meshes:
-        return None
-    if len(meshes) == 1:
-        return meshes[0]
-    return trimesh.boolean.union(meshes, engine="scad")  # usa OpenSCAD si está disponible; si no, cuadrará con cork/igl si presentes
-
-def _difference(a: trimesh.Trimesh, cutters: List[trimesh.Trimesh]) -> trimesh.Trimesh:
-    cutters = [c for c in cutters if c is not None]
-    if not cutters:
-        return a
-    return trimesh.boolean.difference([a] + cutters, engine="scad")
+def _move(m: trimesh.Trimesh, x=0.0, y=0.0, z=0.0) -> trimesh.Trimesh:
+    out = m.copy()
+    out.apply_translation([x, y, z])
+    return out
 
 def _vesa_hole_positions(pitch: float) -> List[Tuple[float, float]]:
+    """Coordenadas X/Z para los 4 agujeros VESA respecto al centro de la placa."""
     half = pitch / 2.0
     return [(-half, -half), (half, -half), (-half, half), (half, half)]
+
+def _safe_union(parts: List[Optional[trimesh.Trimesh]]) -> trimesh.Trimesh:
+    ps = [p for p in parts if isinstance(p, trimesh.Trimesh) and p.vertices.shape[0] > 0]
+    if not ps:
+        return trimesh.Trimesh()
+    if len(ps) == 1:
+        return ps[0]
+    res = bool_union(ps)
+    return res if isinstance(res, trimesh.Trimesh) else trimesh.util.concatenate(ps)
+
+def _safe_diff(a: trimesh.Trimesh, cutters: List[Optional[trimesh.Trimesh]]) -> trimesh.Trimesh:
+    out = a.copy()
+    for c in cutters:
+        if not isinstance(c, trimesh.Trimesh) or c.vertices.shape[0] == 0:
+            continue
+        res = bool_difference(out, c)
+        out = res if isinstance(res, trimesh.Trimesh) else out
+    return out
 
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     """
     Construye el estante VESA.
     Convenciones:
-      - Unidades: mm
-      - Ejes: X (ancho), Y (fondo; el estante se extiende hacia -Y), Z (alto)
-      - El origen queda en la esquina inferior-izquierda de la placa trasera (tras centrado global).
+      - Unidades en mm.
+      - Ejes: X (ancho), Y (fondo; el estante se extiende hacia -Y), Z (alto).
+      - La base del conjunto queda en Z=0.
     """
     p = DEFAULTS.copy()
     if params:
         p.update(params)
 
-    vesa = float(p["vesa"])
-    t = float(p["thickness"])
-    w = float(p["shelf_width"])
-    d = float(p["shelf_depth"])
-    lip_h = float(p["lip_height"])
-    ribs = int(p["rib_count"])
-    hole_d = float(p["hole_d"])
+    # Normaliza numéricos
+    vesa      = float(p.get("vesa", DEFAULTS["vesa"]))
+    t         = float(p.get("thickness", DEFAULTS["thickness"]))
+    w         = float(p.get("shelf_width", DEFAULTS["shelf_width"]))
+    d         = float(p.get("shelf_depth", DEFAULTS["shelf_depth"]))
+    lip_h     = float(p.get("lip_height", DEFAULTS["lip_height"]))
+    ribs      = int(p.get("rib_count", DEFAULTS["rib_count"]))
+    hole_d    = float(p.get("hole_d", DEFAULTS["hole_d"]))
+    qr_enable = bool(p.get("qr_enabled", DEFAULTS["qr_enabled"]))
+    slot_w    = float(p.get("qr_slot_w", DEFAULTS["qr_slot_w"]))
+    slot_h    = float(p.get("qr_slot_h", DEFAULTS["qr_slot_h"]))
+    qr_off    = float(p.get("qr_offset_y", DEFAULTS["qr_offset_y"]))
 
-    # --- 1) Placa trasera (vesa + margen)
+    # --- 1) Placa trasera (vesa + margen) ---
     margin = 40.0
     back_w = vesa + margin
     back_h = vesa + margin
+    # Box centrado en el origen -> lo subimos para que apoye en Z=0
     back = _box((back_w, t, back_h))
-    # por defecto el box se centra en (0,0,0); lo llevamos a que asiente sobre Z=0 y centrado en X
-    back = _translate(back, 0, 0, back_h / 2.0)
+    back = _move(back, 0, 0, back_h / 2.0)
 
-    # --- 2) Taladros VESA
-    holes = []
-    for (hx, hz) in _vesa_hole_positions(vesa):
+    # --- 2) Taladros VESA ---
+    vesa_holes: List[trimesh.Trimesh] = []
+    for hx, hz in _vesa_hole_positions(vesa):
         cyl = _cyl(radius=hole_d / 2.0, height=t * 2.0)
-        cyl = _translate(cyl, hx, 0, hz + back_h / 2.0)  # centra en Z de la placa
-        holes.append(cyl)
-    back = _difference(back, holes)
+        # Centro de la placa está en Z=back_h/2
+        cyl = _move(cyl, hx, 0, back_h / 2.0 + hz)
+        vesa_holes.append(cyl)
+    back = _safe_diff(back, vesa_holes)
 
-    # --- 3) Estante (sale hacia -Y)
+    # --- 3) Estante (sale hacia -Y) ---
     shelf = _box((w, d, t))
-    # Alinear el canto trasero del estante con la parte inferior de la placa
-    # Colocamos el estante centrado en X, con su borde trasero tocando la placa (en Y = -t/2)
-    shelf = _translate(shelf, 0, -(d / 2.0 + t / 2.0), t / 2.0)
+    # Coloca el canto trasero tocando la placa (la placa está en Y≈0 con grosor t)
+    shelf = _move(shelf, 0, -(d / 2.0 + t / 2.0), t / 2.0)
 
-    # --- 4) Labio frontal
+    # --- 4) Pestaña frontal ---
     lip = _box((w, t, lip_h))
-    # Colocar al frente del estante: y = -(d + t)/2  y elevar en Z
-    lip = _translate(lip, 0, -(d + t) / 2.0, t / 2.0 + lip_h / 2.0)
+    lip = _move(lip, 0, -(d + t) / 2.0, t / 2.0 + lip_h / 2.0)
 
-    # --- 5) Refuerzos (ribs) como tabiques perpendiculares al estante
+    # --- 5) Refuerzos (tabiques) ---
     ribs_meshes: List[trimesh.Trimesh] = []
     if ribs > 0:
         step = w / (ribs + 1)
         xs = [(-w / 2.0 + step * (i + 1)) for i in range(ribs)]
         for x in xs:
-            rib = _box((t, d, t))  # tabique fino del grosor t
-            rib = _translate(rib, x, -(d / 2.0 + t / 2.0), t / 2.0)
+            rib = _box((t, d, t))
+            rib = _move(rib, x, -(d / 2.0 + t / 2.0), t / 2.0)
             ribs_meshes.append(rib)
 
-    model = _union([back, shelf, lip] + ribs_meshes)
+    # Unión robusta sin OpenSCAD
+    model = _safe_union([back, shelf, lip] + ribs_meshes)
 
-    # --- 6) Quick-release (ranura rectangular en la placa)
-    if bool(p["qr_enabled"]):
-        slot_w = float(p["qr_slot_w"])
-        slot_h = float(p["qr_slot_h"])
-        qr_off_y = float(p["qr_offset_y"])
-
+    # --- 6) Quick-release (ranura rectangular en la placa) ---
+    if qr_enable:
         slot = _box((slot_w, t * 2.0, slot_h))
-        # Centro de la placa está en (0, 0, back_h/2). Llevamos la ranura un poco arriba (+qr_off_y).
-        slot = _translate(slot, 0, 0, back_h / 2.0 + qr_off_y)
-        model = _difference(model, [slot])
+        slot = _move(slot, 0, 0, back_h / 2.0 + qr_off)
+        model = _safe_diff(model, [slot])
 
-    # Normalizar orientación: que el “suelo” quede en Z=0
-    # (ya construido así). Opcionalmente, trasladar para que el centro geométrico sea (0,0,0):
     model = model.copy()
     model.metadata = {"name": "vesa_shelf", "unit": "mm"}
     return model
