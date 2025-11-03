@@ -77,7 +77,7 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     lip_h     = max(0.0, float(p.get("lip_height", DEFAULTS["lip_height"])))
     ribs      = int(p.get("rib_count", DEFAULTS["rib_count"]))
     hole_d    = max(2.0, float(p.get("hole_d", DEFAULTS["hole_d"])))
-    qr_enable = bool(p.get("qr_enabled", DEFAULTS["qr_enabled"])))
+    qr_enable = bool(p.get("qr_enabled", DEFAULTS["qr_enabled"]))
     slot_w    = max(4.0, float(p.get("qr_slot_w", DEFAULTS["qr_slot_w"])))
     slot_h    = max(2.0, float(p.get("qr_slot_h", DEFAULTS["qr_slot_h"])))
     qr_off    = float(p.get("qr_offset_y", DEFAULTS["qr_offset_y"]))
@@ -87,7 +87,7 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     back_w = vesa + margin
     back_h = vesa + margin
     back = _box((back_w, t, back_h))
-    back = _move(back, 0, 0, back_h / 2.0)  # asienta en Z=0
+    back = _move(back, 0, 0, back_h / 2.0)
 
     # 2) Taladros VESA
     vesa_holes: List[trimesh.Trimesh] = []
