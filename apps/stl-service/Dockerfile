@@ -16,7 +16,9 @@ WORKDIR /app
 # Instalar dependencias primero para aprovechar cache cuando sea posible
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip check \
+ && python -c "import supabase, supabase_auth, storage3, postgrest, realtime, supabase_functions; print('Supabase dependency stack OK')"
 
 # Copiar el resto del código
 COPY . .
