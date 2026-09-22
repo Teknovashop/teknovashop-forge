@@ -459,6 +459,61 @@ def health():
         "whitelist": _whitelist() or [],
     }
 
+@app.get("/debug/storage")
+def debug_storage():
+    """Diagnóstico seguro de conectividad con Supabase Storage.
+
+    No expone ninguna clave. Solo informa del host, resolución DNS
+    y acceso de lectura al bucket configurado.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    raw_url = (SUPABASE_URL or "").strip()
+    host = urlparse(raw_url).hostname if raw_url else None
+
+    result: Dict[str, Any] = {
+        "ok": False,
+        "supabase_configured": bool(raw_url),
+        "service_key_configured": bool(SUPABASE_SERVICE_KEY),
+        "bucket": SUPABASE_BUCKET,
+        "host": host,
+        "dns_ok": False,
+        "storage_ok": False,
+    }
+
+    if not raw_url:
+        result["error"] = "SUPABASE_URL is missing"
+        return result
+    if not SUPABASE_SERVICE_KEY:
+        result["error"] = "SUPABASE_SERVICE_KEY / SERVICE_ROLE_KEY is missing"
+        return result
+    if not host:
+        result["error"] = "SUPABASE_URL has no valid hostname"
+        return result
+
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        result["dns_ok"] = bool(infos)
+        result["resolved_ips"] = sorted({x[4][0] for x in infos})[:4]
+    except Exception as e:
+        result["error"] = f"DNS resolution failed: {e}"
+        return result
+
+    try:
+        from supabase import create_client
+        client = create_client(raw_url.rstrip("/"), SUPABASE_SERVICE_KEY)
+        bucket = client.storage.from_(SUPABASE_BUCKET)
+        listing = bucket.list("", {"limit": 1, "offset": 0})
+        result["storage_ok"] = True
+        result["sample_count"] = len(listing or [])
+        result["ok"] = True
+        return result
+    except Exception as e:
+        result["error"] = f"Storage access failed: {e}"
+        return result
+
+
 @app.get("/debug/models")
 def debug_models():
     wl = _whitelist()
