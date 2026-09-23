@@ -1,99 +1,91 @@
-# apps/stl-service/models/laptop_stand.py
 from __future__ import annotations
 
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any
 import math
-import shapely.geometry as sg
 import trimesh
-from trimesh.transformations import rotation_matrix
-
-from .utils_geo import plate_with_holes, rectangle_plate, concatenate
-from ._helpers import parse_holes
 
 NAME = "laptop_stand"
+SLUGS = ["laptop-stand", "tablet-stand", "soporte-portatil"]
 
-DEFAULTS: Dict[str, float] = {
-    "length_mm": 250.0,   # longitud de apoyo (X)
-    "width_mm": 230.0,    # profundidad total (Z)
-    "height_mm": 120.0,   # elevación posterior (Y)
-    "thickness_mm": 4.0,  # espesor de las piezas
-    "fillet_mm": 4.0,
+DEFAULTS = {
+    "width": 260.0,
+    "depth": 240.0,
+    "angle_deg": 18.0,
+    "lip_h": 8.0,
+    "vent_slot": 12.0,
+    "wall": 4.0,
 }
 
-TYPES: Dict[str, str] = {
-    "length_mm": "float",
-    "width_mm": "float",
-    "height_mm": "float",
-    "thickness_mm": "float",
-    "fillet_mm": "float",
-    "holes": "list[tuple[float,float,float]]",
-}
-
-def _rib_tri_prism(W: float, H: float, T: float) -> trimesh.Trimesh:
-    """
-    Costilla lateral triangular:
-      - Perfil en XY: (0,0) -> (0,H) -> (W, 0.6*H)
-      - Se extruye T (a lo largo de +Z) y luego se rota +90º alrededor de Y
-        para que el espesor T quede alineado con el eje X (costilla “fina” en X).
-      - Finalmente se centra en Z y en X (espesor T simétrico).
-    Resultado: prism con dimensiones aprox (X: T, Y: ~H, Z: ~W).
-    """
-    profile = sg.Polygon([(0.0, 0.0), (0.0, H), (W, 0.6 * H)])
-    rib = trimesh.creation.extrude_polygon(profile, T)  # extruye en +Z
-
-    # Rotar +90° en Y: el espesor (antes en Z) pasa a X.
-    R = rotation_matrix(math.radians(90.0), [0, 1, 0])
-    rib.apply_transform(R)
-
-    # Re-centrar: espesor simétrico en X y centrar en Z
-    rib.apply_translation((-T / 2.0, 0.0, -W / 2.0))
-    return rib
-
+def _num(p: Dict[str, Any], key: str, default: float, *aliases: str) -> float:
+    for k in (key, *aliases):
+        if k in p and p[k] is not None:
+            try:
+                return float(str(p[k]).replace(",", "."))
+            except Exception:
+                pass
+    return float(default)
 
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
-    """
-    Builder principal (firma compat con tu app: recibe SOLO un dict).
-    """
-    L = float(params.get("length_mm",   DEFAULTS["length_mm"]))   # X
-    W = float(params.get("width_mm",    DEFAULTS["width_mm"]))    # Z
-    H = float(params.get("height_mm",   DEFAULTS["height_mm"]))   # Y
-    T = float(params.get("thickness_mm", DEFAULTS["thickness_mm"]))
+    width = max(180.0, _num(params, "width", DEFAULTS["width"], "length_mm"))
+    depth = max(140.0, _num(params, "depth", DEFAULTS["depth"], "width_mm"))
+    angle_deg = min(35.0, max(8.0, _num(params, "angle_deg", DEFAULTS["angle_deg"])))
+    lip_h = max(5.0, _num(params, "lip_h", DEFAULTS["lip_h"]))
+    vent_slot = max(6.0, min(width * 0.5, _num(params, "vent_slot", DEFAULTS["vent_slot"])))
+    wall = max(2.5, _num(params, "wall", DEFAULTS["wall"], "thickness_mm"))
 
-    # Agujeros opcionales (si llegan)
-    holes_in = params.get("holes") or []
-    holes: List[Tuple[float, float, float]] = parse_holes(holes_in)
+    angle = math.radians(angle_deg)
+    horizontal_depth = depth * math.cos(angle)
+    rise = depth * math.sin(angle)
 
-    # ---- Costillas laterales (dos triángulos extruidos) ----
-    rib0 = _rib_tri_prism(W=W, H=H, T=T)  # centrada en Z, espesor centrado en X
+    panel_width = max(25.0, (width - vent_slot) / 2.0)
 
-    # Colocar costillas a los laterales:
-    #   izquierda: centro en x = -L/2 + T/2
-    #   derecha:   centro en x = +L/2 - T/2
-    rib_left = rib0.copy()
-    rib_left.apply_translation((-L / 2.0 + T / 2.0, 0.0, 0.0))
+    def sloped_panel(x_center: float) -> trimesh.Trimesh:
+        panel = trimesh.creation.box(extents=(panel_width, wall, depth))
+        panel.apply_transform(
+            trimesh.transformations.rotation_matrix(-angle, [1, 0, 0])
+        )
+        panel.apply_translation((x_center, wall / 2 + rise / 2, 0.0))
+        return panel
 
-    rib_right = rib0.copy()
-    rib_right.apply_translation((+L / 2.0 - T / 2.0, 0.0, 0.0))
+    x_offset = vent_slot / 2 + panel_width / 2
+    left = sloped_panel(-x_offset)
+    right = sloped_panel(+x_offset)
 
-    # ---- Superficie superior (apoyo del portátil) ----
-    # rectangle_plate(L, ancho, T) -> placa con grosor T (eje Y en tus helpers)
-    top = rectangle_plate(L, T * 2.0, T)
-    # A la altura H y algo retrasada (como tenías)
-    top.apply_translation((0.0, H, -W / 2.0 + W * 0.6))
+    # Base trasera al suelo: estabiliza el soporte.
+    rear_base = trimesh.creation.box(extents=(width, max(18.0, wall * 5), wall))
+    rear_base.apply_translation((0.0, wall / 2, horizontal_depth / 2 - wall))
 
-    # ---- Labio frontal anti-deslizamiento ----
-    lip = rectangle_plate(L, T * 1.5, T)
-    lip.apply_translation((0.0, T * 1.5, -W / 2.0 + T * 2.0))
+    # Dos patas posteriores soportan la elevación.
+    leg_h = max(15.0, rise)
+    leg_w = max(14.0, wall * 4)
+    legs = []
+    for x in (-width / 2 + leg_w / 2, width / 2 - leg_w / 2):
+        leg = trimesh.creation.box(extents=(leg_w, leg_h, wall * 2.0))
+        leg.apply_translation((x, leg_h / 2, horizontal_depth / 2 - wall))
+        legs.append(leg)
 
-    # ---- Base trasera que une costillas (con agujeros opcionales) ----
-    base = plate_with_holes(L, T * 2.5, T, holes)
-    base.apply_translation((0.0, 0.0, W / 2.0 - T * 1.25))
+    # Labio frontal para impedir deslizamiento del equipo.
+    lip = trimesh.creation.box(extents=(width, lip_h, wall))
+    lip.apply_translation((0.0, lip_h / 2, -horizontal_depth / 2 - wall / 2))
 
-    # ---- Ensamble final ----
-    mesh = concatenate([rib_left, rib_right, top, lip, base])
+    # Traviesas frontal/trasera sobre el plano inclinado.
+    cross_front = trimesh.creation.box(extents=(width, wall, wall * 2.0))
+    cross_front.apply_translation((0.0, wall, -horizontal_depth / 2 + wall))
+    cross_rear = trimesh.creation.box(extents=(width, wall, wall * 2.0))
+    cross_rear.apply_translation((0.0, rise, horizontal_depth / 2 - wall))
+
+    mesh = trimesh.util.concatenate(
+        [left, right, rear_base, *legs, lip, cross_front, cross_rear]
+    )
+    mesh.metadata = {
+        "name": "laptop_stand",
+        "unit": "mm",
+        "angle_deg": angle_deg,
+        "vent_slot_mm": vent_slot,
+    }
     return mesh
 
+def make(params: Dict[str, Any]) -> trimesh.Trimesh:
+    return make_model(params)
 
-# Alias para autodiscovery que acepte otros nombres
-BUILD = {"make": make_model, "build": make_model}
-__all__ = ["NAME", "DEFAULTS", "TYPES", "make_model", "BUILD"]
+BUILD = {"make": make, "build": make_model}
