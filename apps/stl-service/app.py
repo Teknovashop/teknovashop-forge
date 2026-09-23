@@ -219,6 +219,43 @@ def _text_ops_for_manifest(body: "GenerateBody") -> List[Dict[str, Any]]:
             out.append(op.dict())
     return out
 
+def _make_design_manifest(
+    *,
+    design_id: str,
+    generated_at: datetime,
+    storage_slug: str,
+    builder_slug: str,
+    params: Dict[str, Any],
+    holes: List[Any],
+    text_ops: List[Dict[str, Any]],
+    object_path: str,
+    stl_bytes: bytes,
+) -> Dict[str, Any]:
+    """Construye el manifiesto reproducible de una generación sin I/O."""
+    product = PRODUCTS.get(storage_slug, {})
+    return {
+        "schema": "teknovashop.design.v1",
+        "design_id": design_id,
+        "generated_at": generated_at.isoformat(),
+        "product": {
+            "slug": storage_slug,
+            "builder": builder_slug,
+            "name": str(product.get("name", storage_slug)),
+            "version": str(product.get("version", "unversioned")),
+            "stage": str(product.get("stage", "unversioned")),
+        },
+        "parameters": dict(params),
+        "holes": list(holes),
+        "text_ops": list(text_ops),
+        "artifact": {
+            "format": "stl",
+            "units": "mm",
+            "path": object_path,
+            "sha256": hashlib.sha256(stl_bytes).hexdigest(),
+            "bytes": len(stl_bytes),
+        },
+    }
+
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(obj, (bytes, bytearray)):
         return (bytes(obj), None)
@@ -773,35 +810,24 @@ def generate(body: GenerateBody, request: Request):
     design_id, generated_at, base_path = _new_design_location(storage_slug)
     object_path = f"{base_path}.stl"
     manifest_path = f"{base_path}.json"
-    stl_sha256 = hashlib.sha256(stl_bytes).hexdigest()
 
     # params ya contiene agujeros normalizados; los separamos para que el
     # manifiesto sea más legible y reproducible.
     manifest_params = dict(params)
     manifest_holes = manifest_params.pop("holes", [])
 
-    manifest = {
-        "schema": "teknovashop.design.v1",
-        "design_id": design_id,
-        "generated_at": generated_at.isoformat(),
-        "product": {
-            "slug": storage_slug,
-            "builder": builder_slug,
-            "name": product_name,
-            "version": product_version,
-            "stage": product_stage,
-        },
-        "parameters": manifest_params,
-        "holes": manifest_holes,
-        "text_ops": _text_ops_for_manifest(body),
-        "artifact": {
-            "format": "stl",
-            "units": "mm",
-            "path": object_path,
-            "sha256": stl_sha256,
-            "bytes": len(stl_bytes),
-        },
-    }
+    manifest = _make_design_manifest(
+        design_id=design_id,
+        generated_at=generated_at,
+        storage_slug=storage_slug,
+        builder_slug=builder_slug,
+        params=manifest_params,
+        holes=manifest_holes,
+        text_ops=_text_ops_for_manifest(body),
+        object_path=object_path,
+        stl_bytes=stl_bytes,
+    )
+    stl_sha256 = manifest["artifact"]["sha256"]
     manifest_bytes = json.dumps(
         manifest,
         ensure_ascii=False,
