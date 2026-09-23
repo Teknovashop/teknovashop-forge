@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Tuple
+import math
 import trimesh
 
 NAME = "wall_hook"
@@ -22,9 +23,6 @@ def _num(p: Dict[str, Any], k: str, fb: float) -> float:
     except Exception:
         return fb
 
-def _holes_grid(h: float, off: float, d: float) -> List[Tuple[float, float, float]]:
-    return [(0.0, h * 0.5 - off, d), (0.0, -h * 0.5 + off, d)]
-
 def _difference(base: trimesh.Trimesh, cutters: List[trimesh.Trimesh]) -> trimesh.Trimesh:
     if not cutters:
         return base
@@ -39,29 +37,66 @@ def _difference(base: trimesh.Trimesh, cutters: List[trimesh.Trimesh]) -> trimes
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     bw = max(30.0, _num(params, "base_w", DEFAULTS["base_w"]))
     bh = max(40.0, _num(params, "base_h", DEFAULTS["base_h"]))
-    t = max(2.4, _num(params, "wall", DEFAULTS["wall"]))
-    gd = max(15.0, _num(params, "hook_depth", DEFAULTS["hook_depth"]))
-    gh = max(15.0, _num(params, "hook_height", DEFAULTS["hook_height"]))
-    gt = max(5.0, _num(params, "hook_t", DEFAULTS["hook_t"]))
-    hd = max(3.0, _num(params, "hole_d", DEFAULTS["hole_d"]))
-    off = max(hd, min(bh * 0.4, _num(params, "hole_off", DEFAULTS["hole_off"])))
+    plate_t = max(2.4, _num(params, "wall", DEFAULTS["wall"]))
+    depth = max(15.0, _num(params, "hook_depth", DEFAULTS["hook_depth"]))
+    lip_h = max(15.0, _num(params, "hook_height", DEFAULTS["hook_height"]))
+    section = max(5.0, _num(params, "hook_t", DEFAULTS["hook_t"]))
+    hole_d = max(3.0, _num(params, "hole_d", DEFAULTS["hole_d"]))
+    hole_off = max(hole_d, min(bh * 0.4, _num(params, "hole_off", DEFAULTS["hole_off"])))
 
-    plate = trimesh.creation.box(extents=(bw, bh, t))
+    # Placa vertical: X = ancho, Y = grosor de pared, Z = altura.
+    plate = trimesh.creation.box(extents=(bw, plate_t, bh))
+
+    # Dos taladros que atraviesan la placa en el eje Y.
     cutters: List[trimesh.Trimesh] = []
-    for x, y, d in _holes_grid(bh, off, hd):
-        c = trimesh.creation.cylinder(radius=d * 0.5, height=t * 1.8, sections=72)
-        c.apply_translation((x, y, 0.0))
-        cutters.append(c)
+    for z in (bh / 2 - hole_off, -bh / 2 + hole_off):
+        cutter = trimesh.creation.cylinder(
+            radius=hole_d / 2,
+            height=plate_t * 1.8,
+            sections=72,
+        )
+        cutter.apply_transform(
+            trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])
+        )
+        cutter.apply_translation((0.0, 0.0, z))
+        cutters.append(cutter)
     plate = _difference(plate, cutters)
 
-    arm = trimesh.creation.box(extents=(gd, gt, t))
-    arm.apply_translation((bw / 2 + gd / 2, -bh / 2 + gt / 2 + 2.0, 0.0))
+    # Brazo horizontal que sale perpendicularmente de la pared.
+    arm_z = -bh / 2 + section * 1.35
+    arm = trimesh.creation.box(extents=(section, depth, section))
+    arm.apply_translation(
+        (0.0, plate_t / 2 + depth / 2, arm_z)
+    )
 
-    lip = trimesh.creation.box(extents=(gt, gh, t))
-    lip.apply_translation((bw / 2 + gd - gt / 2, -bh / 2 + gh / 2 + 2.0, 0.0))
+    # Labio frontal vertical para evitar que el objeto se deslice.
+    lip = trimesh.creation.box(extents=(section, section, lip_h))
+    lip.apply_translation(
+        (
+            0.0,
+            plate_t / 2 + depth - section / 2,
+            arm_z + lip_h / 2 - section / 2,
+        )
+    )
 
-    mesh = trimesh.util.concatenate([plate, arm, lip])
-    mesh.metadata = {"name": "wall_hook", "unit": "mm"}
+    # Cartela/refuerzo entre placa y brazo.
+    brace_h = max(section * 2.0, min(lip_h * 0.55, 22.0))
+    brace_d = max(section * 1.5, min(depth * 0.42, 18.0))
+    brace = trimesh.creation.box(extents=(section, brace_d, brace_h))
+    brace.apply_translation(
+        (
+            0.0,
+            plate_t / 2 + brace_d / 2,
+            arm_z + brace_h / 2 - section / 2,
+        )
+    )
+
+    mesh = trimesh.util.concatenate([plate, arm, lip, brace])
+    mesh.metadata = {
+        "name": "wall_hook",
+        "unit": "mm",
+        "hook_depth_mm": depth,
+    }
     return mesh
 
 def make(params: Dict[str, Any]) -> trimesh.Trimesh:
