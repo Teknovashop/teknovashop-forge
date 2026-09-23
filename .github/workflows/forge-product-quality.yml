@@ -50,4 +50,4 @@ jobs:
       - name: Run 18-product quality gate
         env:
           PYTHONPATH: .
-        run: pytest -q tests/test_product_contracts.py
+        run: pytest -q tests
