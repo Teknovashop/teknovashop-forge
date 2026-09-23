@@ -1,27 +1,18 @@
-# apps/stl-service/models/camera_plate.py
 from __future__ import annotations
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 import trimesh
 
 NAME = "camera_plate"
-SLUGS = ["camera-plate", "qr-plate"]
+SLUGS = ["camera-plate"]
 
 DEFAULTS: Dict[str, float] = {
     "width": 45.0,
     "depth": 50.0,
     "thickness": 6.0,
-    "screw_d": 6.35,   # 1/4"-20 ~ 6.35mm
-    "slot_len": 18.0,  # largo de la ranura longitudinal
-    "slot_w": 6.0,     # ancho ranura (ligeramente > tornillo)
-}
-
-TYPES = {
-    "width": "float",
-    "depth": "float",
-    "thickness": "float",
-    "screw_d": "float",
-    "slot_len": "float",
-    "slot_w": "float",
+    "screw_d": 6.35,
+    "slot_len": 18.0,
+    "slot_w": 6.0,
+    "chamfer": 0.8,
 }
 
 def _num(p: Dict[str, Any], k: str, fb: float) -> float:
@@ -30,53 +21,47 @@ def _num(p: Dict[str, Any], k: str, fb: float) -> float:
     except Exception:
         return fb
 
-def _slot_cutter(slot_len: float, slot_w: float, height: float) -> trimesh.Trimesh:
-    """
-    Crea un "cutter" tipo cápsula (dos cilindros + prisma) para generar una ranura.
-    Orientado a lo largo del eje Y.
-    """
+def _slot_cutters(slot_len: float, slot_w: float, height: float) -> List[trimesh.Trimesh]:
     r = slot_w * 0.5
-    h = height
-    core = trimesh.creation.box(extents=(slot_w, slot_len, h))
+    core_len = max(0.1, slot_len - slot_w)
+    core = trimesh.creation.box(extents=(slot_w, core_len, height))
+    cap = trimesh.creation.cylinder(radius=r, height=height, sections=64)
+    cap1 = cap.copy(); cap1.apply_translation((0.0, +core_len * 0.5, 0.0))
+    cap2 = cap.copy(); cap2.apply_translation((0.0, -core_len * 0.5, 0.0))
+    return [core, cap1, cap2]
 
-    cap = trimesh.creation.cylinder(radius=r, height=h, sections=64)
-    cap1 = cap.copy(); cap1.apply_translation((0.0,  slot_len * 0.5, 0.0))
-    cap2 = cap.copy(); cap2.apply_translation((0.0, -slot_len * 0.5, 0.0))
-
-    return trimesh.util.concatenate([core, cap1, cap2])
+def _difference(base: trimesh.Trimesh, cutters: List[trimesh.Trimesh]) -> trimesh.Trimesh:
+    try:
+        result = trimesh.boolean.difference([base, *cutters], engine="manifold")
+        if isinstance(result, trimesh.Trimesh):
+            return result
+    except Exception:
+        pass
+    return base
 
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
-    W  = _num(params, "width",      DEFAULTS["width"])
-    D  = _num(params, "depth",      DEFAULTS["depth"])
-    T  = _num(params, "thickness",  DEFAULTS["thickness"])
-    d0 = _num(params, "screw_d",    DEFAULTS["screw_d"])
-    Ls = _num(params, "slot_len",   DEFAULTS["slot_len"])
-    Ws = _num(params, "slot_w",     DEFAULTS["slot_w"])
+    W = max(30.0, _num(params, "width", DEFAULTS["width"]))
+    D = max(35.0, _num(params, "depth", DEFAULTS["depth"]))
+    T = max(3.0, _num(params, "thickness", DEFAULTS["thickness"]))
+    d0 = max(5.5, _num(params, "screw_d", DEFAULTS["screw_d"]))
+    slot_len = max(d0 + 2.0, _num(params, "slot_len", DEFAULTS["slot_len"]))
+    slot_w = max(d0, _num(params, "slot_w", DEFAULTS["slot_w"]))
 
-    # Placa base centrada en el origen
     base = trimesh.creation.box(extents=(W, D, T))
 
-    cutters: List[trimesh.Trimesh] = []
+    hole = trimesh.creation.cylinder(radius=d0 * 0.5, height=T * 1.8, sections=96)
+    cutters: List[trimesh.Trimesh] = [hole]
 
-    # Agujero central (1/4"-20)
-    hole = trimesh.creation.cylinder(radius=d0 * 0.5, height=T * 1.4, sections=96)
-    cutters.append(hole)
+    slot_parts = _slot_cutters(slot_len, slot_w, T * 1.8)
+    for part in slot_parts:
+        part.apply_translation((W * 0.18, 0.0, 0.0))
+        cutters.append(part)
 
-    # Ranura longitudinal paralela al eje Y
-    slot = _slot_cutter(Ls, Ws, T * 1.4)
-    # desplaza la ranura hacia un lado para dejar el agujero central
-    slot.apply_translation((W * 0.18, 0.0, 0.0))
-    cutters.append(slot)
+    plate = _difference(base, cutters)
+    plate.metadata = {"name": "camera_plate", "unit": "mm"}
+    return plate
 
-    cutter = trimesh.util.concatenate(cutters)
-    # Boolean – usa OpenSCAD si está, si no el motor que tenga trimesh
-    engine = "scad" if getattr(trimesh.interfaces.scad, "exists", False) else None
-    plate = base.difference(cutter, engine=engine)
-    return plate if isinstance(plate, trimesh.Trimesh) else base
-
-# compat
 def make(params: Dict[str, Any]) -> trimesh.Trimesh:
     return make_model(params)
 
-BUILD = {"make": make}
-__all__ = ["NAME", "SLUGS", "TYPES", "DEFAULTS", "make", "make_model", "BUILD"]
+BUILD = {"make": make, "build": make_model}
