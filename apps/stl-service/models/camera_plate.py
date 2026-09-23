@@ -5,7 +5,7 @@ import shapely.geometry as sg
 from shapely.ops import unary_union
 import trimesh
 
-from .utils_geo import circle, slot
+from .utils_geo import circle, slot, clean_print_solid
 
 NAME = "camera_plate"
 SLUGS = ["camera-plate"]
@@ -52,6 +52,7 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
 
     shape = outline.difference(unary_union([centre_hole, adjustment_slot]))
     mesh = trimesh.creation.extrude_polygon(shape, thickness)
+    mesh = clean_print_solid(mesh)
     mesh.apply_translation((0.0, 0.0, -thickness / 2.0))
     mesh.metadata = {
         "name": "camera_plate",
