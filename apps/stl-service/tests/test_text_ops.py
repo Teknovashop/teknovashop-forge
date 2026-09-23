@@ -4,7 +4,10 @@ import hashlib
 
 import trimesh
 
+import models.text_ops as text_ops
 from models.text_ops import apply_text_ops
+
+text_ops.DEBUG = True
 
 
 def _hash(mesh: trimesh.Trimesh) -> str:
