@@ -85,6 +85,55 @@ def test_variant_parameters_change_geometry(slug):
     )
 
 
+
+
+def _perturb_value(key: str, value):
+    if isinstance(value, bool):
+        return not value
+    if not isinstance(value, (int, float)):
+        raise AssertionError(f"Unsupported contract parameter type for {key}: {type(value).__name__}")
+
+    if "count" in key:
+        return int(value) + 1
+    if "angle" in key:
+        return float(value) + 5.0
+    if "pattern" in key or key == "vesa":
+        return float(value) + 25.0
+    if abs(float(value)) < 2.0:
+        return float(value) + 0.5
+    return float(value) * 1.20
+
+
+PARAMETER_CASES = [
+    (slug, key)
+    for slug, contract in PRODUCTS.items()
+    for key in contract["default"].keys()
+]
+
+
+@pytest.mark.parametrize(
+    "slug,key",
+    PARAMETER_CASES,
+    ids=[f"{slug}:{key}" for slug, key in PARAMETER_CASES],
+)
+def test_each_public_parameter_affects_geometry(slug, key):
+    contract = PRODUCTS[slug]
+    base = _build(contract)
+
+    changed = {
+        key: _perturb_value(key, contract["default"][key])
+    }
+    variant = _build(contract, changed)
+
+    base_hash = hashlib.sha256(_stl_bytes(base)).hexdigest()
+    variant_hash = hashlib.sha256(_stl_bytes(variant)).hexdigest()
+
+    assert base_hash != variant_hash, (
+        f"{slug}.{key}: changing this public parameter did not change the STL. "
+        "Implement the parameter or remove it from the public product contract/UI."
+    )
+
+
 def test_exactly_18_canonical_products_are_contractually_defined():
     assert len(PRODUCTS) == 18
     assert len(set(CANONICAL_SLUGS)) == 18
