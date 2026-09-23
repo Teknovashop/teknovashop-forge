@@ -53,17 +53,13 @@ def upload_and_get_url(
 ) -> Dict[str, Optional[str]]:
     path = (object_path or "").lstrip("/")
     if not path or "/" not in path:
-        raise ValueError("object_path must be '<slug>/forge-output.stl'")
+        raise ValueError("object_path must include a product prefix and filename")
 
     cli = _get()
     store = cli.storage.from_(SUPABASE_BUCKET)
 
-    # Emula upsert sin enviar cabecera booleana x-upsert
-    try:
-        store.remove([path])
-    except Exception:
-        pass
-
+    # Los artefactos de diseño son inmutables. Las rutas incluyen UUID,
+    # por lo que una colisión debe fallar en lugar de sobrescribir.
     opts = {
         "content-type": content_type,
         "contentType": content_type,
