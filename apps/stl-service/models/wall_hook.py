@@ -5,7 +5,7 @@ import shapely.geometry as sg
 from shapely.ops import unary_union
 import trimesh
 
-from .utils_geo import circle
+from .utils_geo import circle, clean_print_solid
 
 NAME = "wall_hook"
 SLUGS = ["wall-hook", "wall-bracket-hook"]
@@ -37,6 +37,7 @@ def _plate_with_vertical_holes(
     ])
     shape = outer.difference(holes)
     plate = trimesh.creation.extrude_polygon(shape, thickness)
+    plate = clean_print_solid(plate)
     plate.apply_translation((0.0, 0.0, -thickness / 2))
     # La placa 2D estaba en XY; la ponemos vertical XZ y el grosor pasa a Y.
     plate.apply_transform(
