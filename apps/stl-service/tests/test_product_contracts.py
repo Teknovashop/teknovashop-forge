@@ -157,6 +157,31 @@ def test_each_public_parameter_affects_geometry(slug, key):
     )
 
 
+FREE_HOLE_PRODUCTS = [
+    slug
+    for slug, contract in PRODUCTS.items()
+    if contract.get("capabilities", {}).get("free_holes")
+]
+
+
+@pytest.mark.parametrize("slug", FREE_HOLE_PRODUCTS)
+def test_free_holes_capability_adds_printable_geometry_change(slug):
+    contract = PRODUCTS[slug]
+    base = _build(contract)
+
+    # Punto deliberadamente alejado de los patrones nativos y dentro de
+    # las placas por defecto de los productos que exponen free_holes.
+    with_extra = _build(contract, {"holes": [(30.0, 10.0, 4.0)]})
+
+    assert _hash_or_bytes(base) != _hash_or_bytes(with_extra)
+    assert with_extra.is_watertight
+    assert abs(float(with_extra.volume)) > 1e-6
+
+
+def _hash_or_bytes(mesh: trimesh.Trimesh) -> str:
+    return hashlib.sha256(_stl_bytes(mesh)).hexdigest()
+
+
 def test_exactly_18_canonical_products_are_contractually_defined():
     assert len(PRODUCTS) == 18
     assert len(set(CANONICAL_SLUGS)) == 18
