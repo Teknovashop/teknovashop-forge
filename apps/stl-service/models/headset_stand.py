@@ -1,78 +1,65 @@
-# apps/stl-service/models/headset_stand.py
-from typing import Dict, Any, List, Tuple
-import math
-import numpy as np
+from __future__ import annotations
+
+from typing import Dict, Any
 import trimesh
-from trimesh.creation import box, cylinder
-from .utils_geo import plate_with_holes, rectangle_plate, concatenate
-from ._helpers import parse_holes
 
 NAME = "headset_stand"
+SLUGS = ["headset-stand", "soporte-auriculares"]
 
-# Usamos el contrato genérico: length_mm, width_mm, height_mm, thickness_mm, fillet_mm
-DEFAULTS: Dict[str, float] = {
-    "length_mm": 120.0,   # largo de la base (X)
-    "width_mm": 80.0,     # fondo de la base (Z)
-    "height_mm": 260.0,   # altura del mástil
-    "thickness_mm": 4.0,  # espesor de placas
-    "fillet_mm": 6.0      # radio suave en transiciones (estético, aproximado)
+DEFAULTS = {
+    "base_w": 120.0,
+    "base_d": 120.0,
+    "stem_h": 260.0,
+    "stem_w": 30.0,
+    "hook_r": 40.0,
+    "wall": 4.0,
 }
 
-TYPES: Dict[str, str] = {
-    "length_mm": "float",
-    "width_mm": "float",
-    "height_mm": "float",
-    "thickness_mm": "float",
-    "fillet_mm": "float",
-    "holes": "list[tuple[float,float,float]]"
-}
+def _num(p: Dict[str, Any], key: str, default: float, *aliases: str) -> float:
+    for k in (key, *aliases):
+        if k in p and p[k] is not None:
+            try:
+                return float(str(p[k]).replace(",", "."))
+            except Exception:
+                pass
+    return float(default)
 
-def _u_yoke(inner_radius: float, width: float, thickness: float) -> trimesh.Trimesh:
-    """
-    Genera una 'horquilla' en U para apoyar la diadema.
-    Se aproxima con 2 cilindros laterales + un puente rectangular curvado.
-    """
-    r = inner_radius
-    w = width
-    t = thickness
+def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
+    base_w = max(80.0, _num(params, "base_w", DEFAULTS["base_w"], "length_mm"))
+    base_d = max(80.0, _num(params, "base_d", DEFAULTS["base_d"], "width_mm"))
+    stem_h = max(180.0, _num(params, "stem_h", DEFAULTS["stem_h"], "height_mm"))
+    stem_w = max(18.0, _num(params, "stem_w", DEFAULTS["stem_w"]))
+    support_half = max(20.0, _num(params, "hook_r", DEFAULTS["hook_r"]))
+    wall = max(3.0, _num(params, "wall", DEFAULTS["wall"], "thickness_mm"))
 
-    # dos columnas (cilindros) a cada lado
-    col = cylinder(radius=t/2.0, height=w, sections=64)
-    col.apply_rotation(trimesh.transformations.rotation_matrix(math.pi/2, [1,0,0]))
-    c1 = col.copy(); c1.apply_translation((+r, 0, 0))
-    c2 = col.copy(); c2.apply_translation((-r, 0, 0))
+    base = trimesh.creation.box(extents=(base_w, base_d, wall))
+    base.apply_translation((0.0, 0.0, wall / 2))
 
-    # puente superior (caja curvada aproximada con una caja)
-    bridge = box(extents=(2*r + t, t, w))
-    bridge.apply_translation((0, r, 0))
+    # Mástil ligeramente retrasado para que el centro de gravedad quede sobre la base.
+    stem = trimesh.creation.box(extents=(stem_w, wall * 2.0, stem_h))
+    stem.apply_translation((0.0, base_d * 0.16, wall + stem_h / 2))
 
-    u = concatenate([c1, c2, bridge])
-    # elevar un poco para sentar sobre el mástil
-    u.apply_translation((0, 0, 0))
-    return u
+    support_w = support_half * 2.0
+    saddle = trimesh.creation.box(extents=(support_w, stem_w, wall * 2.0))
+    saddle.apply_translation((0.0, base_d * 0.16, wall + stem_h + wall))
 
-def make_model(params: Dict[str, Any], holes: List[Tuple[float, float, float]] = ()) -> trimesh.Trimesh:
-    L = float(params.get("length_mm", DEFAULTS["length_mm"]))
-    W = float(params.get("width_mm", DEFAULTS["width_mm"]))
-    H = float(params.get("height_mm", DEFAULTS["height_mm"]))
-    T = float(params.get("thickness_mm", DEFAULTS["thickness_mm"]))
-    F = float(params.get("fillet_mm", DEFAULTS["fillet_mm"]))
+    # Labios laterales para que la diadema no deslice.
+    lip_h = max(10.0, wall * 3.0)
+    lips = []
+    for x in (-support_w / 2 + wall / 2, support_w / 2 - wall / 2):
+        lip = trimesh.creation.box(extents=(wall, stem_w, lip_h))
+        lip.apply_translation((x, base_d * 0.16, wall + stem_h + lip_h / 2))
+        lips.append(lip)
 
-    # Base rectangular con agujeros opcionales para atornillar (x,z,d) en el plano
-    hxz = parse_holes(holes) if holes else []
-    base = plate_with_holes(L, W, T, hxz)
+    # Refuerzo entre mástil y apoyo superior.
+    gusset = trimesh.creation.box(extents=(stem_w * 1.6, stem_w, wall * 3.0))
+    gusset.apply_translation((0.0, base_d * 0.16, wall + stem_h - wall))
 
-    # Mástil: placa vertical (X por Y = altura), centrado en X, colocado en el fondo
-    mast = rectangle_plate(T * 3, H, T)  # mástil delgado, 3T de ancho
-    mast.apply_translation((0, T + H/2.0, -W/2.0 + T*2))
-
-    # Yoke superior: ancho ~ L*0.6, radio interior ~ L*0.25
-    y_w = L * 0.6
-    y_r = L * 0.25
-    yoke = _u_yoke(y_r, y_w, T)
-    # Colocar el yoke en la cima del mástil
-    yoke.apply_translation((0, T + H, -W/2.0 + T*2))
-
-    mesh = concatenate([base, mast, yoke])
-    # Centrar en torno al origen: ya está centrado en X, adelantado en +Y (espesor)
+    mesh = trimesh.util.concatenate([base, stem, saddle, *lips, gusset])
+    mesh.metadata = {"name": "headset_stand", "unit": "mm"}
     return mesh
+
+def make(params: Dict[str, Any]) -> trimesh.Trimesh:
+    return make_model(params)
+
+BUILD = {"make": make, "build": make_model}
