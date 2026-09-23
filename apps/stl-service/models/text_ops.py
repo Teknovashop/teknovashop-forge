@@ -341,8 +341,14 @@ def _place_text_on_face(
     v = R[:3, 1]
     n = R[:3, 2]
 
-    n_clear = 0.05  # mm, evita z-fighting
-    offset_n = (float(depth) * 0.5 + n_clear) * (1.0 if mode == "emboss" else -1.0)
+    # Para booleanos robustos la geometría debe SOLAPAR la cara.
+    # Emboss: entra 0.05 mm y sale hacia fuera.
+    # Engrave: atraviesa desde el interior hasta 0.05 mm fuera de la cara.
+    overlap = 0.05
+    if mode == "emboss":
+        offset_n = -overlap
+    else:
+        offset_n = -float(depth) + overlap
 
     T = np.eye(4)
     T[:3, 3] = origin + u * float(pos[0]) + v * float(pos[1]) + n * float(offset_n)
@@ -359,7 +365,7 @@ def _place_text_on_face(
 def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         from trimesh.boolean import union
-        res = union([a, b], engine=None)
+        res = union([a, b], engine="manifold")
         if isinstance(res, trimesh.Trimesh) and len(res.vertices):
             return res
     except Exception as e:
@@ -370,7 +376,7 @@ def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.T
 def _boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         from trimesh.boolean import difference
-        res = difference([a], [b], engine=None)
+        res = difference([a, b], engine="manifold")
         if isinstance(res, trimesh.Trimesh) and len(res.vertices):
             return res
     except Exception as e:
@@ -416,8 +422,7 @@ def apply_text_ops(
 
         solid = _make_text_solid(text=text, height=size, depth=depth, font_spec=font_spec)
         if not isinstance(solid, trimesh.Trimesh) or len(solid.vertices) == 0:
-            _log("skip: no solid for text")
-            continue
+            raise RuntimeError(f"No se pudo generar geometría para el texto '{text}'")
 
         placed = _place_text_on_face(
             text_mesh=solid, base=out, anchor=anchor, pos=(px, py, pz), depth=depth, mode=mode
@@ -425,10 +430,16 @@ def apply_text_ops(
 
         if mode == "emboss":
             merged = _boolean_union(out, placed)
-            out = merged if merged is not None else _concat([out, placed])
-        else:
+            if merged is None:
+                raise RuntimeError(f"No se pudo unir el relieve '{text}' a la pieza")
+            out = merged
+        elif mode == "engrave":
             carved = _boolean_diff(out, placed)
-            out = carved if carved is not None else _concat([out, placed])
+            if carved is None:
+                raise RuntimeError(f"No se pudo grabar el texto '{text}' en la pieza")
+            out = carved
+        else:
+            raise ValueError(f"Modo de texto no soportado: {mode}")
 
     return out
 
