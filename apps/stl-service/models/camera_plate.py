@@ -1,6 +1,11 @@
 from __future__ import annotations
-from typing import Dict, Any, List
+from typing import Dict, Any
+
+import shapely.geometry as sg
+from shapely.ops import unary_union
 import trimesh
+
+from .utils_geo import circle, slot
 
 NAME = "camera_plate"
 SLUGS = ["camera-plate"]
@@ -21,45 +26,39 @@ def _num(p: Dict[str, Any], k: str, fb: float) -> float:
     except Exception:
         return fb
 
-def _slot_cutters(slot_len: float, slot_w: float, height: float) -> List[trimesh.Trimesh]:
-    r = slot_w * 0.5
-    core_len = max(0.1, slot_len - slot_w)
-    core = trimesh.creation.box(extents=(slot_w, core_len, height))
-    cap = trimesh.creation.cylinder(radius=r, height=height, sections=64)
-    cap1 = cap.copy(); cap1.apply_translation((0.0, +core_len * 0.5, 0.0))
-    cap2 = cap.copy(); cap2.apply_translation((0.0, -core_len * 0.5, 0.0))
-    return [core, cap1, cap2]
-
-def _difference(base: trimesh.Trimesh, cutters: List[trimesh.Trimesh]) -> trimesh.Trimesh:
-    try:
-        result = trimesh.boolean.difference([base, *cutters], engine="manifold")
-        if isinstance(result, trimesh.Trimesh):
-            return result
-    except Exception:
-        pass
-    return base
+def _chamfered_rectangle(width: float, depth: float, chamfer: float) -> sg.Polygon:
+    x = width / 2.0
+    y = depth / 2.0
+    c = max(0.0, min(chamfer, min(width, depth) * 0.22))
+    if c <= 0.001:
+        return sg.box(-x, -y, x, y)
+    return sg.Polygon([
+        (-x + c, -y), (x - c, -y), (x, -y + c), (x, y - c),
+        (x - c, y), (-x + c, y), (-x, y - c), (-x, -y + c),
+    ])
 
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
-    W = max(30.0, _num(params, "width", DEFAULTS["width"]))
-    D = max(35.0, _num(params, "depth", DEFAULTS["depth"]))
-    T = max(3.0, _num(params, "thickness", DEFAULTS["thickness"]))
-    d0 = max(5.5, _num(params, "screw_d", DEFAULTS["screw_d"]))
-    slot_len = max(d0 + 2.0, _num(params, "slot_len", DEFAULTS["slot_len"]))
-    slot_w = max(d0, _num(params, "slot_w", DEFAULTS["slot_w"]))
+    width = max(30.0, _num(params, "width", DEFAULTS["width"]))
+    depth = max(35.0, _num(params, "depth", DEFAULTS["depth"]))
+    thickness = max(3.0, _num(params, "thickness", DEFAULTS["thickness"]))
+    screw_d = max(5.5, _num(params, "screw_d", DEFAULTS["screw_d"]))
+    slot_len = max(screw_d + 2.0, _num(params, "slot_len", DEFAULTS["slot_len"]))
+    slot_w = max(screw_d, _num(params, "slot_w", DEFAULTS["slot_w"]))
+    chamfer = max(0.0, _num(params, "chamfer", DEFAULTS["chamfer"]))
 
-    base = trimesh.creation.box(extents=(W, D, T))
+    outline = _chamfered_rectangle(width, depth, chamfer)
+    centre_hole = circle(0.0, 0.0, screw_d)
+    adjustment_slot = slot(width * 0.18, 0.0, slot_len, slot_w, angle_deg=90.0)
 
-    hole = trimesh.creation.cylinder(radius=d0 * 0.5, height=T * 1.8, sections=96)
-    cutters: List[trimesh.Trimesh] = [hole]
-
-    slot_parts = _slot_cutters(slot_len, slot_w, T * 1.8)
-    for part in slot_parts:
-        part.apply_translation((W * 0.18, 0.0, 0.0))
-        cutters.append(part)
-
-    plate = _difference(base, cutters)
-    plate.metadata = {"name": "camera_plate", "unit": "mm"}
-    return plate
+    shape = outline.difference(unary_union([centre_hole, adjustment_slot]))
+    mesh = trimesh.creation.extrude_polygon(shape, thickness)
+    mesh.apply_translation((0.0, 0.0, -thickness / 2.0))
+    mesh.metadata = {
+        "name": "camera_plate",
+        "unit": "mm",
+        "chamfer_mm": chamfer,
+    }
+    return mesh
 
 def make(params: Dict[str, Any]) -> trimesh.Trimesh:
     return make_model(params)
