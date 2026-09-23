@@ -596,6 +596,7 @@ def catalog_products():
                 "name": contract["name"],
                 "version": contract["version"],
                 "stage": contract["stage"],
+                "capabilities": contract.get("capabilities", {}),
                 "defaults": contract["default"],
             }
             for slug, contract in PRODUCTS.items()
