@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import os
+import json
+import hashlib
 import inspect
 import importlib
 import sys
@@ -17,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from models import REGISTRY, ALIASES  # registro dinámico + alias para slugs
+from model_contracts import PRODUCTS
 from supabase_client import upload_and_get_url  # subida + URL firmada
 
 # -------------------------------------------------------------------
@@ -195,6 +198,26 @@ def _new_object_path(storage_slug: str, extension: str) -> str:
         f"{now:%Y/%m/%d}/"
         f"{now:%H%M%S}-{uuid4().hex}.{ext}"
     )
+
+def _new_design_location(storage_slug: str) -> Tuple[str, datetime, str]:
+    """Crea un ID y prefijo compartido para STL + manifiesto."""
+    generated_at = datetime.now(timezone.utc)
+    design_id = uuid4().hex
+    base_path = (
+        f"{storage_slug}/"
+        f"{generated_at:%Y/%m/%d}/"
+        f"{generated_at:%H%M%S}-{design_id}"
+    )
+    return design_id, generated_at, base_path
+
+def _text_ops_for_manifest(body: "GenerateBody") -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for op in body.text_ops or []:
+        if hasattr(op, "model_dump"):
+            out.append(op.model_dump())
+        else:
+            out.append(op.dict())
+    return out
 
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(obj, (bytes, bytearray)):
@@ -525,6 +548,24 @@ def debug_storage():
         return result
 
 
+@app.get("/catalog/products")
+def catalog_products():
+    """Catálogo canónico versionado usado por producto, QA y clientes."""
+    return {
+        "count": len(PRODUCTS),
+        "products": [
+            {
+                "slug": slug,
+                "name": contract["name"],
+                "version": contract["version"],
+                "stage": contract["stage"],
+                "defaults": contract["default"],
+            }
+            for slug, contract in PRODUCTS.items()
+        ],
+    }
+
+
 @app.get("/debug/models")
 def debug_models():
     wl = _whitelist()
@@ -723,13 +764,78 @@ def generate(body: GenerateBody, request: Request):
             pass
 
     stl_bytes, maybe_name = _as_stl_bytes(result)
-    object_path = _new_object_path(storage_slug, "stl")
+
+    product = PRODUCTS.get(storage_slug, {})
+    product_version = str(product.get("version", "unversioned"))
+    product_stage = str(product.get("stage", "unversioned"))
+    product_name = str(product.get("name", storage_slug))
+
+    design_id, generated_at, base_path = _new_design_location(storage_slug)
+    object_path = f"{base_path}.stl"
+    manifest_path = f"{base_path}.json"
+    stl_sha256 = hashlib.sha256(stl_bytes).hexdigest()
+
+    # params ya contiene agujeros normalizados; los separamos para que el
+    # manifiesto sea más legible y reproducible.
+    manifest_params = dict(params)
+    manifest_holes = manifest_params.pop("holes", [])
+
+    manifest = {
+        "schema": "teknovashop.design.v1",
+        "design_id": design_id,
+        "generated_at": generated_at.isoformat(),
+        "product": {
+            "slug": storage_slug,
+            "builder": builder_slug,
+            "name": product_name,
+            "version": product_version,
+            "stage": product_stage,
+        },
+        "parameters": manifest_params,
+        "holes": manifest_holes,
+        "text_ops": _text_ops_for_manifest(body),
+        "artifact": {
+            "format": "stl",
+            "units": "mm",
+            "path": object_path,
+            "sha256": stl_sha256,
+            "bytes": len(stl_bytes),
+        },
+    }
+    manifest_bytes = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    ).encode("utf-8")
 
     try:
-        out = upload_and_get_url(stl_bytes, object_path)
-        return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
+        stl_upload = upload_and_get_url(stl_bytes, object_path)
+        manifest_upload = upload_and_get_url(
+            manifest_bytes,
+            manifest_path,
+            content_type="application/json",
+            cache_control="max-age=31536000, immutable",
+        )
+        return {
+            "ok": True,
+            "slug": builder_slug,
+            "design_id": design_id,
+            "product_name": product_name,
+            "product_version": product_version,
+            "product_stage": product_stage,
+            "generated_at": generated_at.isoformat(),
+            "path": object_path,
+            "manifest_path": manifest_path,
+            "sha256": stl_sha256,
+            "signed_url": (stl_upload or {}).get("signed_url"),
+            "manifest_signed_url": (manifest_upload or {}).get("signed_url"),
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Artifact/manifest upload error: {e}",
+        )
 
 @app.post("/admin/cleanup-underscore")
 def cleanup_underscore(request: Request):
