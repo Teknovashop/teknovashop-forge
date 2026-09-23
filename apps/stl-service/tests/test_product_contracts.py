@@ -140,10 +140,13 @@ def test_exactly_18_canonical_products_are_contractually_defined():
 
 
 def test_product_contracts_have_required_metadata():
-    required = {"builder", "name", "version", "stage", "default", "variant", "min_extents"}
+    required = {"builder", "name", "version", "stage", "capabilities", "default", "variant", "min_extents"}
     for slug, contract in PRODUCTS.items():
         missing = required - set(contract)
         assert not missing, f"{slug}: missing contract keys {sorted(missing)}"
         assert contract["name"].strip(), f"{slug}: public name is empty"
+        assert isinstance(contract["capabilities"], dict), f"{slug}: capabilities must be a dict"
+        assert "text" in contract["capabilities"], f"{slug}: missing text capability"
+        assert "free_holes" in contract["capabilities"], f"{slug}: missing free_holes capability"
         assert contract["default"], f"{slug}: default parameters are empty"
         assert contract["variant"], f"{slug}: variant parameters are empty"
