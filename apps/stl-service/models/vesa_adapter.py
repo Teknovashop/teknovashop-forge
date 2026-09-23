@@ -62,6 +62,39 @@ def _dedupe_holes(holes: List[Tuple[float, float, float]]) -> List[Tuple[float, 
     return out
 
 
+def _extra_holes(
+    params: Dict[str, Any],
+    plate_w: float,
+    plate_h: float,
+) -> List[Tuple[float, float, float]]:
+    """Agujeros libres adicionales, con coordenadas X/Y desde el centro."""
+    raw = params.get("holes") or []
+    out: List[Tuple[float, float, float]] = []
+
+    for item in raw:
+        try:
+            x, y, d = item
+            x = float(x)
+            y = float(y)
+            d = float(d)
+        except Exception as exc:
+            raise ValueError(f"Invalid extra hole definition: {item!r}") from exc
+
+        if d <= 0:
+            raise ValueError("Extra hole diameter must be greater than 0")
+
+        r = d / 2.0
+        if abs(x) + r > plate_w / 2.0 or abs(y) + r > plate_h / 2.0:
+            raise ValueError(
+                f"Extra hole ({x}, {y}, Ø{d}) does not fit inside "
+                f"{plate_w} x {plate_h} mm plate"
+            )
+
+        out.append((x, y, d))
+
+    return out
+
+
 def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     """
     Adaptador VESA real entre DOS patrones cuadrados.
@@ -122,6 +155,7 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     holes = _dedupe_holes(
         _pattern_holes(p_from, hole_d)
         + _pattern_holes(p_to, hole_d)
+        + _extra_holes(params, plate_w, plate_h)
     )
 
     mesh = plate_with_holes(plate_w, plate_h, thickness, holes)
