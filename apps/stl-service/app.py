@@ -523,6 +523,87 @@ def debug_models():
     # Responder en kebab-case para el front
     return {"models": sorted([k.replace("_", "-") for k in keys])}
 
+@app.get("/debug/model-audit")
+def debug_model_audit(slug: Optional[str] = None):
+    """Genera modelos en memoria y devuelve métricas geométricas seguras.
+
+    No sube archivos ni expone secretos. Sirve para comprobar que cada
+    builder produce una malla utilizable con sus valores por defecto.
+    """
+    import numpy as np
+
+    def _audit_one(name: str) -> Dict[str, Any]:
+        builder = REGISTRY.get(name)
+        if not builder:
+            return {"slug": name.replace("_", "-"), "ok": False, "error": "builder missing"}
+
+        try:
+            try:
+                mesh = builder({})
+            except TypeError:
+                mesh = _call_builder_compat(builder, {})
+
+            if isinstance(mesh, (list, tuple)):
+                meshes = [m for m in mesh if isinstance(m, trimesh.Trimesh)]
+                mesh = trimesh.util.concatenate(meshes) if meshes else None
+
+            if not isinstance(mesh, trimesh.Trimesh):
+                return {
+                    "slug": name.replace("_", "-"),
+                    "ok": False,
+                    "error": f"builder returned {type(mesh).__name__}",
+                }
+
+            if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+                return {
+                    "slug": name.replace("_", "-"),
+                    "ok": False,
+                    "error": "empty mesh",
+                }
+
+            extents = np.asarray(mesh.extents, dtype=float)
+            bounds = np.asarray(mesh.bounds, dtype=float)
+            components = mesh.split(only_watertight=False)
+
+            return {
+                "slug": name.replace("_", "-"),
+                "ok": bool(np.all(np.isfinite(extents)) and np.all(extents > 0)),
+                "vertices": int(len(mesh.vertices)),
+                "faces": int(len(mesh.faces)),
+                "extents_mm": [round(float(x), 3) for x in extents.tolist()],
+                "bounds_mm": [
+                    [round(float(x), 3) for x in bounds[0].tolist()],
+                    [round(float(x), 3) for x in bounds[1].tolist()],
+                ],
+                "watertight": bool(mesh.is_watertight),
+                "components": int(len(components)),
+                "volume_mm3": round(float(abs(mesh.volume)), 3) if np.isfinite(mesh.volume) else None,
+            }
+        except Exception as e:
+            return {
+                "slug": name.replace("_", "-"),
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    if slug:
+        name = _norm_slug_for_builder(slug)
+        if name not in REGISTRY:
+            _lazy_load_builder(name)
+        if name not in REGISTRY:
+            raise HTTPException(status_code=404, detail=f"Model '{slug}' not found")
+        return _audit_one(name)
+
+    results = [_audit_one(name) for name in sorted(REGISTRY.keys())]
+    return {
+        "ok": all(item.get("ok") for item in results),
+        "count": len(results),
+        "passed": sum(1 for item in results if item.get("ok")),
+        "failed": sum(1 for item in results if not item.get("ok")),
+        "models": results,
+    }
+
+
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
     hdr_uid = request.headers.get("x-user-id") or request.headers.get("x-user")
