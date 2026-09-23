@@ -4,6 +4,7 @@ uvicorn[standard]==0.27.1
 numpy==1.26.4
 shapely==2.0.3
 trimesh==4.4.3
+networkx>=3.2,<4
 
 # Boolean robusta
 manifold3d==3.2.1
