@@ -68,6 +68,29 @@ def test_default_product_generates_valid_stl(slug):
 
 
 @pytest.mark.parametrize("slug", CANONICAL_SLUGS)
+def test_all_mesh_components_are_closed_printable_volumes(slug):
+    contract = PRODUCTS[slug]
+    mesh = _build(contract)
+
+    components = list(mesh.split(only_watertight=False))
+    assert components, f"{slug}: mesh contains no components"
+
+    bad = []
+    for i, part in enumerate(components):
+        if not part.is_watertight or not part.is_winding_consistent:
+            bad.append({
+                "component": i,
+                "watertight": bool(part.is_watertight),
+                "winding": bool(part.is_winding_consistent),
+                "faces": len(part.faces),
+            })
+        assert math.isfinite(float(part.volume)), f"{slug}: component {i} has non-finite volume"
+        assert abs(float(part.volume)) > 1e-6, f"{slug}: component {i} has zero volume"
+
+    assert not bad, f"{slug}: non-printable components detected: {bad}"
+
+
+@pytest.mark.parametrize("slug", CANONICAL_SLUGS)
 def test_variant_parameters_change_geometry(slug):
     contract = PRODUCTS[slug]
     base = _build(contract)
