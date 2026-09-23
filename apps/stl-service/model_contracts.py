@@ -98,7 +98,7 @@ PRODUCTS = {
     "mic-arm-clip": {
         "builder": "mic_arm_clip",
         "name": "Clip Brazo Mic",
-        "default": {"arm_d": 20.0, "opening": 0.6, "clip_t": 3.0, "width": 14.0, "wall": 3.0},
+        "default": {"arm_d": 20.0, "opening": 0.6, "clip_t": 3.0, "width": 14.0},
         "variant": {"arm_d": 28.0, "width": 18.0},
         "min_extents": (15.0, 15.0, 8.0),
     },
