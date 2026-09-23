@@ -185,5 +185,12 @@ PRODUCTS = {
     },
 }
 
+DEFAULT_PRODUCT_VERSION = "1.0.0-beta.1"
+DEFAULT_PRODUCT_STAGE = "engineering-beta"
+
+for _contract in PRODUCTS.values():
+    _contract.setdefault("version", DEFAULT_PRODUCT_VERSION)
+    _contract.setdefault("stage", DEFAULT_PRODUCT_STAGE)
+
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
 assert len(CANONICAL_SLUGS) == 18
