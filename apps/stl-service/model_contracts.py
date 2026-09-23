@@ -191,6 +191,16 @@ DEFAULT_PRODUCT_STAGE = "engineering-beta"
 for _contract in PRODUCTS.values():
     _contract.setdefault("version", DEFAULT_PRODUCT_VERSION)
     _contract.setdefault("stage", DEFAULT_PRODUCT_STAGE)
+    _contract.setdefault(
+        "capabilities",
+        {
+            "text": True,
+            "free_holes": False,
+        },
+    )
+
+# La perforación libre x/y solo tiene semántica bien definida en esta placa.
+PRODUCTS["qr-plate"]["capabilities"]["free_holes"] = True
 
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
 assert len(CANONICAL_SLUGS) == 18
