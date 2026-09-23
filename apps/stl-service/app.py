@@ -8,6 +8,7 @@ import sys
 import traceback
 import types
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 
 import trimesh
@@ -184,6 +185,16 @@ def _norm_slug_for_builder(s: str) -> str:
 
 def _slug_for_storage(s: str) -> str:
     return (s or "").strip().lower().replace("_", "-")
+
+def _new_object_path(storage_slug: str, extension: str) -> str:
+    """Ruta única e inmutable para una generación."""
+    now = datetime.now(timezone.utc)
+    ext = extension.lstrip(".").lower()
+    return (
+        f"{storage_slug}/"
+        f"{now:%Y/%m/%d}/"
+        f"{now:%H%M%S}-{uuid4().hex}.{ext}"
+    )
 
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(obj, (bytes, bytearray)):
@@ -687,8 +698,7 @@ def generate(body: GenerateBody, request: Request):
             scene.export(file_obj=buf, file_type="glb")
             glb_bytes = buf.getvalue()
 
-            filename = "forge-preview.glb"
-            object_path = f"{storage_slug}/{filename}"
+            object_path = _new_object_path(storage_slug, "glb")
             out = upload_and_get_url(glb_bytes, object_path)
             return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
         except Exception as e:
@@ -713,8 +723,7 @@ def generate(body: GenerateBody, request: Request):
             pass
 
     stl_bytes, maybe_name = _as_stl_bytes(result)
-    filename = maybe_name or "forge-output.stl"
-    object_path = f"{storage_slug}/{filename}"
+    object_path = _new_object_path(storage_slug, "stl")
 
     try:
         out = upload_and_get_url(stl_bytes, object_path)
