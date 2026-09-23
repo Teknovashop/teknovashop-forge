@@ -42,6 +42,87 @@ def _concat(meshes: Iterable[trimesh.Trimesh]) -> trimesh.Trimesh:
     return trimesh.util.concatenate(lst)
 
 
+def _as_positive_volume(mesh: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
+    """Sanea una malla para booleanos manifold y exige volumen positivo."""
+    if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.vertices):
+        return None
+
+    m = mesh.copy()
+    try:
+        m.remove_unreferenced_vertices()
+    except Exception:
+        pass
+    try:
+        m.merge_vertices()
+    except Exception:
+        pass
+    try:
+        m.process(validate=True)
+    except Exception:
+        pass
+    try:
+        trimesh.repair.fix_normals(m, multibody=True)
+    except Exception:
+        try:
+            trimesh.repair.fix_normals(m)
+        except Exception:
+            pass
+
+    try:
+        if float(m.volume) < 0:
+            m.invert()
+    except Exception:
+        pass
+
+    if bool(getattr(m, "is_volume", False)):
+        return m
+
+    # Si es multicomponente, repara cada sólido por separado.
+    fixed: List[trimesh.Trimesh] = []
+    try:
+        components = m.split(only_watertight=False)
+    except Exception:
+        components = [m]
+
+    for part in components:
+        p = part.copy()
+        try:
+            p.process(validate=True)
+        except Exception:
+            pass
+        try:
+            trimesh.repair.fix_normals(p, multibody=True)
+        except Exception:
+            try:
+                trimesh.repair.fix_normals(p)
+            except Exception:
+                pass
+        try:
+            if float(p.volume) < 0:
+                p.invert()
+        except Exception:
+            pass
+        if bool(getattr(p, "is_volume", False)):
+            fixed.append(p)
+
+    if not fixed:
+        _log(
+            "text mesh is not a volume:",
+            "watertight=", getattr(m, "is_watertight", None),
+            "winding=", getattr(m, "is_winding_consistent", None),
+            "volume=", getattr(m, "volume", None),
+        )
+        return None
+
+    out = _concat(fixed)
+    try:
+        if float(out.volume) < 0:
+            out.invert()
+    except Exception:
+        pass
+    return out if bool(getattr(out, "is_volume", False)) else None
+
+
 def _bounds_center_extents(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     mn, mx = mesh.bounds
     mn = np.asarray(mn, dtype=float)
@@ -207,7 +288,7 @@ def _make_text_solid(text: str, height: float, depth: float, font_spec: Optional
                             continue
 
                     if solids:
-                        return _concat(solids)
+                        return _as_positive_volume(_concat(solids))
                 else:
                     _log("no polygons from trimesh.text()")
         except Exception as e:
@@ -284,7 +365,7 @@ def _make_text_solid(text: str, height: float, depth: float, font_spec: Optional
                 continue
 
         if solids:
-            return _concat(solids)
+            return _as_positive_volume(_concat(solids))
     except Exception as e:
         _log("Matplotlib TextPath fallback error:", e)
 
@@ -365,7 +446,11 @@ def _place_text_on_face(
 def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         from trimesh.boolean import union
-        res = union([a, b], engine="manifold")
+        aa = _as_positive_volume(a)
+        bb = _as_positive_volume(b)
+        if aa is None or bb is None:
+            return None
+        res = union([aa, bb], engine="manifold")
         if isinstance(res, trimesh.Trimesh) and len(res.vertices):
             return res
     except Exception as e:
@@ -376,7 +461,11 @@ def _boolean_union(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.T
 def _boolean_diff(a: trimesh.Trimesh, b: trimesh.Trimesh) -> Optional[trimesh.Trimesh]:
     try:
         from trimesh.boolean import difference
-        res = difference([a, b], engine="manifold")
+        aa = _as_positive_volume(a)
+        bb = _as_positive_volume(b)
+        if aa is None or bb is None:
+            return None
+        res = difference([aa, bb], engine="manifold")
         if isinstance(res, trimesh.Trimesh) and len(res.vertices):
             return res
     except Exception as e:
