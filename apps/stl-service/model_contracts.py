@@ -149,9 +149,12 @@ PRODUCTS = {
     "headset-stand": {
         "builder": "headset_stand",
         "name": "Soporte Auriculares",
-        "default": {"base_w": 110.0, "base_d": 100.0, "height": 230.0, "top_w": 60.0, "wall": 5.0},
-        "variant": {"height": 270.0, "top_w": 75.0},
-        "min_extents": (50.0, 40.0, 120.0),
+        "default": {
+            "base_w": 120.0, "base_d": 120.0, "stem_h": 260.0,
+            "stem_w": 30.0, "hook_r": 40.0, "wall": 4.0,
+        },
+        "variant": {"stem_h": 300.0, "hook_r": 50.0, "base_w": 140.0},
+        "min_extents": (50.0, 40.0, 180.0),
     },
     "vesa-shelf": {
         "builder": "vesa_shelf",
