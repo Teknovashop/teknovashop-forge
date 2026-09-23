@@ -28,6 +28,56 @@ def slot(x: float, y: float, length: float, d: float, angle_deg: float = 0.0) ->
     return poly
 
 
+
+def clean_print_solid(mesh: trimesh.Trimesh, min_volume: float = 1e-6) -> trimesh.Trimesh:
+    """Normaliza una extrusión y elimina fragmentos geométricos sin volumen.
+
+    Algunas triangulaciones de polígonos con agujeros pueden dejar triángulos
+    huérfanos. Para impresión 3D esos fragmentos son basura y deben desaparecer
+    antes de exportar el STL.
+    """
+    m = mesh.copy()
+
+    try:
+        m.update_faces(m.unique_faces())
+    except Exception:
+        pass
+    try:
+        m.update_faces(m.nondegenerate_faces())
+    except Exception:
+        try:
+            m.remove_degenerate_faces()
+        except Exception:
+            pass
+    try:
+        m.remove_unreferenced_vertices()
+    except Exception:
+        pass
+
+    try:
+        parts = list(m.split(only_watertight=False))
+    except Exception:
+        parts = [m]
+
+    solids = []
+    for part in parts:
+        try:
+            volume = abs(float(part.volume))
+        except Exception:
+            volume = 0.0
+        if volume > min_volume:
+            try:
+                part.remove_unreferenced_vertices()
+            except Exception:
+                pass
+            solids.append(part)
+
+    if not solids:
+        return m
+    if len(solids) == 1:
+        return solids[0]
+    return trimesh.util.concatenate(solids)
+
 def plate_with_holes(L: float, W: float, T: float, holes: Iterable[Tuple[float, float, float]] = ()) -> trimesh.Trimesh:
     """
     Genera placa (XY) con agujeros circulares (x,z,d). Se extruye en +Y (espesor T).
@@ -43,6 +93,7 @@ def plate_with_holes(L: float, W: float, T: float, holes: Iterable[Tuple[float, 
     else:
         poly = outer
     mesh = trimesh.creation.extrude_polygon(poly, T)
+    mesh = clean_print_solid(mesh)
     # desplazar para apoyar en Y=0
     mesh.apply_translation((0, T / 2.0, 0))
     return mesh
@@ -62,6 +113,7 @@ def rectangle_plate(L: float, H: float, T: float, holes: Iterable[Tuple[float, f
     else:
         poly = outer
     mesh = trimesh.creation.extrude_polygon(poly, T)
+    mesh = clean_print_solid(mesh)
     mesh.apply_translation((0, T / 2.0, 0))
     return mesh
 
