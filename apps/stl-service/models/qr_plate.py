@@ -31,10 +31,20 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     slot_mm = float(params.get("slot_mm", DEFAULTS["slot_mm"]))
     d = float(params.get("screw_d_mm", DEFAULTS["screw_d_mm"]))
 
-    if params.get("holes") is not None:
-        holes = parse_holes(params["holes"])
-    else:
-        s = slot_mm / 2.0
-        holes = [(0.0, 0.0, d), ( s, 0.0, d), (-s, 0.0, d)]
+    s = slot_mm / 2.0
+    native_holes = [(0.0, 0.0, d), (s, 0.0, d), (-s, 0.0, d)]
+    extra_holes = parse_holes(params.get("holes") or [])
+
+    holes = native_holes + extra_holes
+
+    for x, y, hole_d in extra_holes:
+        r = hole_d / 2.0
+        if hole_d <= 0:
+            raise ValueError("Extra hole diameter must be greater than 0")
+        if abs(x) + r > L / 2.0 or abs(y) + r > W / 2.0:
+            raise ValueError(
+                f"Extra hole ({x}, {y}, Ø{hole_d}) does not fit inside "
+                f"{L} x {W} mm plate"
+            )
 
     return plate_with_holes(L, W, T, holes)
