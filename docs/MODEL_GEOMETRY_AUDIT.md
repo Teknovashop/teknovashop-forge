@@ -14,53 +14,38 @@ Purpose: ensure every public model name corresponds to recognizable, parameteriz
 
 | Slug | Public name | Status | Current geometry | Required action |
 |---|---|---:|---|---|
-| vesa-adapter | Adaptador VESA 75/100 → 100/200 | ❌ | Single square plate with one 4-hole VESA pattern | Implement two distinct mounting patterns (source + target), correct plate envelope and non-overlapping holes |
-| router-mount | Soporte de Router | ❌ | Flat rectangular plate | Build cradle/wall mount with bottom support, side retainers and mounting slots/holes |
+| vesa-adapter | Adaptador VESA (2 patrones) | ✅ | Plate with two configurable square VESA mounting patterns | Keep; validate supported pattern combinations and clearances |
+| router-mount | Soporte de Router | ✅ | Wall cradle with back plate, shelf, retainers and fixing holes | Keep; validate router size ranges and load behaviour |
 | cable-tray | Bandeja de Cables | ✅ | U-shaped tray: base + two side walls, optional ventilation | Keep; validate dimensions and improve ventilation slots |
 | laptop-stand | Soporte Laptop / Tablet | ✅ | Two triangular ribs, upper support, front lip and rear base | Keep; validate stability and parameter ranges |
-| phone-stand | Soporte / Dock Móvil (USB-C) | ❌ | Plain rectangular block; angle is explicitly not implemented | Build real angled backrest, phone ledge and USB-C/cable clearance |
+| phone-stand | Soporte / Dock Móvil (USB-C) | ✅ | Angled stand with backrest, ledge and cable clearance | Keep; validate phone thickness and USB-C clearance ranges |
 | ssd-holder | Caddy SSD 2.5 a 3.5 | ✅ | Base with side rails and front/rear retention | Keep; add real 2.5"/3.5" screw patterns later |
-| raspi-case | Caja Raspberry Pi | ⚠️ | Hollow rectangular enclosure when boolean succeeds | Add lid, board standoffs and connector/vent cut-outs; define Pi variant |
-| go-pro-mount | Soporte GoPro | ❌ | Rectangular block with one transverse hole | Implement standard fork/finger interface and bolt passage |
+| raspi-case | Caja Raspberry Pi 4 Model B | ✅ | Ventilated enclosure with lid, Pi 4 mounting bosses and connector windows | Keep; physical-fit validation against real board still required |
+| go-pro-mount | Soporte GoPro | ✅ | Three-finger fork-style mount with transverse bolt passage | Keep; validate interchangeability against real GoPro hardware |
 | mic-arm-clip | Clip Brazo Mic | ✅ | Split cylindrical ring clip | Keep; validate opening and grip tolerances |
 | camera-plate | Placa para Cámara | ✅ | Plate with 1/4" hole and elongated adjustment slot | Keep; refine anti-twist / edge options later |
 | wall-hook | Colgador de Pared | ✅ | Base plate plus L-shaped projecting hook and fixing holes | Keep; validate orientation and strength parameters |
 | wall-bracket | Escuadra de Pared | ✅ | L-shaped horizontal + vertical bracket | Keep; add screw holes / optional gusset |
-| cable-clip | Clip de Cable | ❌ | Flat plate with central through-hole | Implement open/snap cable clip geometry around cable diameter |
+| cable-clip | Clip de Cable | ✅ | Open snap-style ring with adhesive base | Keep; validate material-flex ranges by cable diameter |
 | hub-holder | Soporte Hub USB | ✅ | Open-top holder formed by outer/inner subtraction | Keep; add cable exits and retention options |
 | headset-stand | Soporte Auriculares | ✅ | Base, mast and top yoke | Keep; refine yoke curvature and stability |
 | vesa-shelf | Bandeja VESA | ✅ | VESA back plate + horizontal shelf + front lip + ribs | Keep; validate hole patterns and shelf load geometry |
-| enclosure-ip65 | Caja IP65 | ❌ | Solid rectangular block | Implement hollow enclosure + lid + gasket groove + screw bosses; do not claim IP65 until physically validated |
-| qr-plate | Placa (QR/Texto) | ⚠️ | Parametric plate with mounting holes; no QR geometry is generated | Either implement real QR relief/engraving or rename to identification/text plate |
+| enclosure-ip65 | Caja técnica con tapa | ✅ | Hollow enclosure with separate lid and centring lip | Keep; do not claim any IP rating without physical validation |
+| qr-plate | Placa de identificación / Texto | ✅ | Parametric identification plate with mounting holes; text can be added through Forge text tools | Keep under accurate name; QR generation can be added later as a separate feature |
 
 ## Immediate conclusions
 
-### Models that should not be presented as finished until redesigned
+### Current semantic status
 
-1. vesa-adapter
-2. router-mount
-3. phone-stand
-4. go-pro-mount
-5. cable-clip
-6. enclosure-ip65
+All 18 canonical public models now have geometry that broadly matches their public name.
 
-### Models that need completion or more precise naming
+Remaining physical-validation items:
 
-1. raspi-case
-2. qr-plate
-
-### Models suitable for the next validation stage
-
-1. cable-tray
-2. laptop-stand
-3. ssd-holder
-4. mic-arm-clip
-5. camera-plate
-6. wall-hook
-7. wall-bracket
-8. hub-holder
-9. headset-stand
-10. vesa-shelf
+1. Raspberry Pi 4 case: verify connector openings and mounting fit against a real board.
+2. GoPro mount: verify fork spacing and bolt fit against real hardware.
+3. Cable clip: validate flex/snap behaviour for real print materials and cable diameters.
+4. Technical enclosure: no IP rating is claimed until physical testing is performed.
+5. QR generation is not currently claimed; the model is published as an identification/text plate.
 
 ## Acceptance criteria for every production model
 
