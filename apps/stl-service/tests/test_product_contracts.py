@@ -140,7 +140,7 @@ def test_exactly_18_canonical_products_are_contractually_defined():
 
 
 def test_product_contracts_have_required_metadata():
-    required = {"builder", "name", "default", "variant", "min_extents"}
+    required = {"builder", "name", "version", "stage", "default", "variant", "min_extents"}
     for slug, contract in PRODUCTS.items():
         missing = required - set(contract)
         assert not missing, f"{slug}: missing contract keys {sorted(missing)}"
