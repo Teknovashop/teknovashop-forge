@@ -795,11 +795,25 @@ def generate(body: GenerateBody, request: Request):
                 from models.text_ops import apply_text_ops as _applier
             except Exception:
                 _applier = None
-    if _applier and body.text_ops:
+    if body.text_ops:
+        if _applier is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Text engine is not available on the Forge backend",
+            )
         try:
-            result = _applier(result, [op.dict() for op in body.text_ops])
-        except Exception:
-            pass
+            ops = [
+                op.model_dump() if hasattr(op, "model_dump") else op.dict()
+                for op in body.text_ops
+            ]
+            result = _applier(result, ops)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Text operation failed: {e}",
+            )
 
     stl_bytes, maybe_name = _as_stl_bytes(result)
 
