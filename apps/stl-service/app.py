@@ -256,6 +256,45 @@ def _make_design_manifest(
         },
     }
 
+def _make_preview_stl_bytes(stl_bytes: bytes) -> Tuple[bytes, float]:
+    """Create a precision-degraded STL for browser preview.
+
+    The preview intentionally snaps vertices to a coarse grid. It preserves the
+    overall shape for visual validation while making the browser asset unsuitable
+    as the authoritative manufacturing file.
+    """
+    import numpy as np
+
+    loaded = trimesh.load(
+        io.BytesIO(stl_bytes),
+        file_type="stl",
+        force="mesh",
+        process=False,
+    )
+    if not isinstance(loaded, trimesh.Trimesh):
+        raise TypeError("Preview source is not a mesh")
+    if len(loaded.vertices) == 0 or len(loaded.faces) == 0:
+        raise ValueError("Preview source mesh is empty")
+
+    mesh = loaded.copy()
+    max_dim = float(max(mesh.extents)) if len(mesh.extents) else 1.0
+    precision_mm = max(0.8, min(2.0, max_dim / 120.0))
+
+    snapped = np.round(np.asarray(mesh.vertices, dtype=float) / precision_mm) * precision_mm
+    preview = trimesh.Trimesh(
+        vertices=snapped,
+        faces=np.asarray(mesh.faces, dtype=int).copy(),
+        process=True,
+        validate=False,
+    )
+    preview.remove_unreferenced_vertices()
+
+    out = preview.export(file_type="stl")
+    if isinstance(out, str):
+        out = out.encode("utf-8")
+    return bytes(out), round(precision_mm, 3)
+
+
 def _as_stl_bytes(obj: Any) -> Tuple[bytes, Optional[str]]:
     if isinstance(obj, (bytes, bytearray)):
         return (bytes(obj), None)
@@ -744,44 +783,15 @@ def generate(body: GenerateBody, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Model build error: {e}")
 
-    # --------- PREVIEW (GLB) opcional ---------
+    # El antiguo preview GLB contenía geometría de precisión completa y podía
+    # reconstruirse fuera del navegador. Se deshabilita para evitar que el
+    # artefacto de fabricación se filtre antes de la compra.
     fmt = (request.query_params.get("fmt") or "").strip().lower()
     if fmt == "glb":
-        try:
-            place_layers = None
-            try:
-                from models.text_ops import place_text_layers as place_layers
-            except Exception:
-                try:
-                    from models import place_text_layers as place_layers
-                except Exception:
-                    place_layers = None
-
-            texts = []
-            if place_layers and body.text_ops:
-                texts = place_layers(result, [op.dict() for op in (body.text_ops or [])])
-
-            from trimesh.visual import ColorVisuals
-            base = result.copy()
-            base.visual = ColorVisuals(base, face_colors=[210, 210, 210, 255])
-
-            for t in texts:
-                t.visual = ColorVisuals(t, face_colors=[0, 120, 255, 255])
-
-            scene = trimesh.Scene()
-            scene.add_geometry(base, node_name="base")
-            for i, t in enumerate(texts):
-                scene.add_geometry(t, node_name=f"text_{i}")
-
-            buf = io.BytesIO()
-            scene.export(file_obj=buf, file_type="glb")
-            glb_bytes = buf.getvalue()
-
-            object_path = _new_object_path(storage_slug, "glb")
-            out = upload_and_get_url(glb_bytes, object_path)
-            return {"ok": True, "slug": builder_slug, "path": object_path, **(out or {})}
-        except Exception as e:
-            print("[FORGE][GLB] error:", e)
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy full-precision GLB preview disabled; use the standard preview flow.",
+        )
 
     # --------- STL final (con texto booleano si aplica) ---------
     _applier = None
@@ -851,12 +861,30 @@ def generate(body: GenerateBody, request: Request):
     ).encode("utf-8")
 
     try:
-        stl_upload = upload_and_get_url(stl_bytes, object_path)
-        manifest_upload = upload_and_get_url(
+        preview_bytes, preview_precision_mm = _make_preview_stl_bytes(stl_bytes)
+        preview_path = f"{base_path}-preview.stl"
+
+        # Manufacturing artifacts stay private. Only the deliberately degraded
+        # preview receives a short-lived browser URL.
+        upload_and_get_url(
+            stl_bytes,
+            object_path,
+            sign=False,
+            cache_control="private, max-age=0, no-store",
+        )
+        upload_and_get_url(
             manifest_bytes,
             manifest_path,
+            sign=False,
             content_type="application/json",
-            cache_control="max-age=31536000, immutable",
+            cache_control="private, max-age=0, no-store",
+        )
+        preview_upload = upload_and_get_url(
+            preview_bytes,
+            preview_path,
+            sign=True,
+            expires_in=15 * 60,
+            cache_control="private, max-age=900",
         )
         return {
             "ok": True,
@@ -869,8 +897,9 @@ def generate(body: GenerateBody, request: Request):
             "path": object_path,
             "manifest_path": manifest_path,
             "sha256": stl_sha256,
-            "signed_url": (stl_upload or {}).get("signed_url"),
-            "manifest_signed_url": (manifest_upload or {}).get("signed_url"),
+            "preview_path": preview_path,
+            "preview_url": (preview_upload or {}).get("signed_url"),
+            "preview_precision_mm": preview_precision_mm,
         }
     except Exception as e:
         raise HTTPException(
