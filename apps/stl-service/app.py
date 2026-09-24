@@ -128,6 +128,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "forge-stl")
 CLEANUP_TOKEN = os.getenv("CLEANUP_TOKEN", "")  # mantenimiento
+DIAGNOSTICS_TOKEN = os.getenv("FORGE_DIAGNOSTICS_TOKEN", "")
 
 # -------- Gate de negocio (env) ----------
 REQUIRE_ENTITLEMENT = os.getenv("FORGE_REQUIRE_ENTITLEMENT", "0") == "1"
@@ -156,6 +157,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def _require_diagnostics(request: Request) -> None:
+    if not DIAGNOSTICS_TOKEN:
+        raise HTTPException(status_code=404, detail="Not found")
+    if request.headers.get("x-diagnostics-token", "") != DIAGNOSTICS_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # -------------------------- Schemas --------------------------
 
@@ -560,17 +568,12 @@ def health():
     return {
         "ok": True,
         "service": "forge-stl",
-        "origins": origins,
-        "loaded_models": sorted(list(REGISTRY.keys())),
-        "aliases_count": len(ALIASES),
-        "adapters": sorted(list(ADAPTERS.keys())),
-        "require_entitlement": REQUIRE_ENTITLEMENT,
-        "free_slugs": sorted(list(FORGE_FREE_SLUGS)),
-        "whitelist": _whitelist() or [],
+        "catalog_count": len(PRODUCTS),
     }
 
 @app.get("/debug/storage")
-def debug_storage():
+def debug_storage(request: Request):
+    _require_diagnostics(request)
     """Diagnóstico seguro de conectividad con Supabase Storage.
 
     No expone ninguna clave. Solo informa del host, resolución DNS
@@ -644,7 +647,8 @@ def catalog_products():
 
 
 @app.get("/debug/models")
-def debug_models():
+def debug_models(request: Request):
+    _require_diagnostics(request)
     wl = _whitelist()
     keys = list(REGISTRY.keys())
     if wl:
@@ -653,7 +657,8 @@ def debug_models():
     return {"models": sorted([k.replace("_", "-") for k in keys])}
 
 @app.get("/debug/model-audit")
-def debug_model_audit(slug: Optional[str] = None):
+def debug_model_audit(request: Request, slug: Optional[str] = None):
+    _require_diagnostics(request)
     """Genera modelos en memoria y devuelve métricas geométricas seguras.
 
     No sube archivos ni expone secretos. Sirve para comprobar que cada
