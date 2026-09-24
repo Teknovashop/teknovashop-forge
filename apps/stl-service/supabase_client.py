@@ -50,6 +50,7 @@ def upload_and_get_url(
     content_type: str = "model/stl",
     cache_control: str = "public, max-age=31536000, immutable",
     expires_in: int = 3600,
+    sign: bool = True,
 ) -> Dict[str, Optional[str]]:
     path = (object_path or "").lstrip("/")
     if not path or "/" not in path:
@@ -68,6 +69,9 @@ def upload_and_get_url(
     }
     payload = data.getvalue() if hasattr(data, "getvalue") else bytes(data)  # type: ignore
     store.upload(path, payload, opts)
+
+    if not sign:
+        return {"path": path, "signed_url": None}
 
     signed = store.create_signed_url(path, expires_in)
     signed_url = None
