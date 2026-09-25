@@ -202,6 +202,7 @@ for _contract in PRODUCTS.values():
 # La perforación libre x/y es adicional a los agujeros nativos de estas placas.
 PRODUCTS["qr-plate"]["capabilities"]["free_holes"] = True
 PRODUCTS["vesa-adapter"]["capabilities"]["free_holes"] = True
+PRODUCTS["cable-clip"]["capabilities"]["free_holes"] = True
 
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
 assert len(CANONICAL_SLUGS) == 18
