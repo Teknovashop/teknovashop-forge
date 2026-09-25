@@ -163,6 +163,10 @@ FREE_HOLE_PRODUCTS = [
     if contract.get("capabilities", {}).get("free_holes")
 ]
 
+FREE_HOLE_SAMPLE = {
+    "cable-clip": [(0.0, 0.0, 4.0)],
+}
+
 
 @pytest.mark.parametrize("slug", FREE_HOLE_PRODUCTS)
 def test_free_holes_capability_adds_printable_geometry_change(slug):
@@ -171,7 +175,8 @@ def test_free_holes_capability_adds_printable_geometry_change(slug):
 
     # Punto deliberadamente alejado de los patrones nativos y dentro de
     # las placas por defecto de los productos que exponen free_holes.
-    with_extra = _build(contract, {"holes": [(30.0, 10.0, 4.0)]})
+    holes = FREE_HOLE_SAMPLE.get(slug, [(30.0, 10.0, 4.0)])
+    with_extra = _build(contract, {"holes": holes})
 
     assert _hash_or_bytes(base) != _hash_or_bytes(with_extra)
     assert with_extra.is_watertight

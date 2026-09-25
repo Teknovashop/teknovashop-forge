@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any
 import trimesh
+from ._helpers import parse_holes
 
 NAME = "cable_clip"
 SLUGS = ["cable-clip"]
@@ -53,12 +54,28 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
     ring = _difference(ring, slot)
 
     base_t = max(1.8, wall * 0.75)
+    base_center_y = -(outer_r + adhesive_w / 2 - wall)
+    base_center_z = -clip_len / 2 + base_t / 2
     base = trimesh.creation.box(extents=(adhesive_l, adhesive_w, base_t))
     base.apply_translation((
         0.0,
-        -(outer_r + adhesive_w / 2 - wall),
-        -clip_len / 2 + base_t / 2,
+        base_center_y,
+        base_center_z,
     ))
+
+    for x, y, d in parse_holes(params.get("holes") or []):
+        r = d / 2.0
+        if d <= 0:
+            raise ValueError("Extra hole diameter must be greater than 0")
+        if abs(x) + r > adhesive_l / 2.0 or abs(y) + r > adhesive_w / 2.0:
+            raise ValueError(
+                f"Extra hole ({x}, {y}, Ø{d}) does not fit inside "
+                f"{adhesive_l} x {adhesive_w} mm adhesive base"
+            )
+
+        cutter = trimesh.creation.cylinder(radius=r, height=base_t * 2.4, sections=48)
+        cutter.apply_translation((x, base_center_y + y, base_center_z))
+        base = _difference(base, cutter)
 
     neck = trimesh.creation.box(
         extents=(wall * 2.2, adhesive_w * 0.45, clip_len)
