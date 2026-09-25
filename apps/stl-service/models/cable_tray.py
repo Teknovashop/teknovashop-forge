@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any
 import trimesh
+from ._helpers import difference, parse_holes, union
 
 NAME = "cable_tray"
 SLUGS = ["cable-tray", "bandeja-cables"]
@@ -46,6 +47,24 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         braces.append(brace)
 
     mesh = trimesh.util.concatenate([base, left, right, *braces])
+    cutters = []
+    for x, y, d in parse_holes(params.get("holes") or []):
+        r = d / 2.0
+        if d <= 0:
+            raise ValueError("Extra hole diameter must be greater than 0")
+        if abs(x) + r > width / 2.0 or abs(y) + r > depth / 2.0:
+            raise ValueError(
+                f"Extra hole ({x}, {y}, Ø{d}) does not fit inside "
+                f"{width} x {depth} mm tray floor"
+            )
+
+        cutter = trimesh.creation.cylinder(radius=r, height=wall * 3.0, sections=48)
+        cutter.apply_translation((x, y, wall / 2.0))
+        cutters.append(cutter)
+
+    if cutters:
+        mesh = difference(mesh, cutters[0] if len(cutters) == 1 else union(cutters))
+
     mesh.metadata = {"name": "cable_tray", "unit": "mm"}
     return mesh
 
