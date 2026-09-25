@@ -203,6 +203,7 @@ for _contract in PRODUCTS.values():
 PRODUCTS["qr-plate"]["capabilities"]["free_holes"] = True
 PRODUCTS["vesa-adapter"]["capabilities"]["free_holes"] = True
 PRODUCTS["cable-clip"]["capabilities"]["free_holes"] = True
+PRODUCTS["cable-tray"]["capabilities"]["free_holes"] = True
 
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
 assert len(CANONICAL_SLUGS) == 18
