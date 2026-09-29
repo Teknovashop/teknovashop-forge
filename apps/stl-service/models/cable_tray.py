@@ -46,7 +46,6 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         brace.apply_translation((x, 0.0, wall * 0.75))
         braces.append(brace)
 
-    mesh = trimesh.util.concatenate([base, left, right, *braces])
     cutters = []
     for x, y, d in parse_holes(params.get("holes") or []):
         r = d / 2.0
@@ -63,8 +62,15 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         cutters.append(cutter)
 
     if cutters:
-        mesh = difference(mesh, cutters[0] if len(cutters) == 1 else union(cutters))
+        # Free holes belong to the tray floor. Cut the watertight base before
+        # concatenating the side walls/braces; booleaning the already
+        # overlapping multi-body assembly can create non-manifold edges.
+        base = difference(
+            base,
+            cutters[0] if len(cutters) == 1 else union(cutters),
+        )
 
+    mesh = trimesh.util.concatenate([base, left, right, *braces])
     mesh.metadata = {"name": "cable_tray", "unit": "mm"}
     return mesh
 
