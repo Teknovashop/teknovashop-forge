@@ -516,6 +516,55 @@ def _db():
         _supabase_db = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     return _supabase_db
 
+def _authenticated_user_id(request: Request) -> Optional[str]:
+    """Return the authenticated Supabase user id from a verified bearer token.
+
+    Caller-supplied identity headers/body fields are intentionally ignored.
+    The access token is validated against Supabase Auth before its user id is
+    trusted for entitlement checks.
+    """
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth.lower().startswith("bearer "):
+        return None
+
+    token = auth.split(None, 1)[1].strip() if " " in auth else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise HTTPException(status_code=503, detail="Supabase auth verification is not configured")
+
+    try:
+        import httpx
+
+        response = httpx.get(
+            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=10.0,
+        )
+    except Exception:
+        raise HTTPException(status_code=503, detail="Supabase auth verification unavailable")
+
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=401, detail="Invalid or expired authorization token")
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail="Supabase auth verification failed")
+
+    try:
+        payload = response.json()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Supabase auth verification returned invalid data")
+
+    user_id = str((payload or {}).get("id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user id missing")
+
+    return user_id
+
+
 def _is_entitled(user_id: str, slug_like: str) -> bool:
     if not user_id or not slug_like:
         return False
@@ -740,8 +789,9 @@ def debug_model_audit(request: Request, slug: Optional[str] = None):
 
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
-    hdr_uid = request.headers.get("x-user-id") or request.headers.get("x-user")
-    user_id = (hdr_uid or body.user_id or "").strip() or None
+    # Identity must come from a verified Supabase access token. Never trust
+    # x-user-id/x-user or body.user_id because this service is internet-facing.
+    user_id = _authenticated_user_id(request)
 
     raw_slug = (body.slug or body.model or "").strip()
     incoming_params = dict(body.params or {})
