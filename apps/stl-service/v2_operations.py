@@ -9,7 +9,7 @@ import trimesh
 PILOT_CAPABILITIES = {
     "cable-tray": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
     "vesa-adapter": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vesa_pattern", "scallop_pattern", "rib", "boss", "wave_ribs"},
-    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vent_linear", "vent_hex", "rib", "wave_ribs", "cable_channel"},
+    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
 }
 
 
@@ -105,21 +105,6 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             pocket_depth = _num(params.get("depth_mm"), 0)
             if width < 4 or height < 4 or pocket_depth < 0.4 or pocket_depth > 12:
                 issues.append(ValidationIssue("pocket_rect", f"{op_id}: rebaje rectangular inválido."))
-        elif typ == "pocket_rect":
-            width = _num(params.get("width_mm"))
-            height = _num(params.get("height_mm"))
-            pocket_depth = _num(params.get("depth_mm"))
-            if not _fits_xy(out, x, y, width / 2, height / 2):
-                raise ValueError(f"{op_id}: rebaje demasiado cerca del borde")
-            target = (op.get("target") or {}).get("face", "top")
-            lo_z = float(out.bounds[0][2])
-            hi_z = float(out.bounds[1][2])
-            shallow_h = pocket_depth + 0.6
-            shallow_z = (hi_z - pocket_depth / 2 + 0.3) if target == "top" else (lo_z + pocket_depth / 2 - 0.3)
-            cutter = trimesh.creation.box(extents=(width, height, shallow_h))
-            cutter.apply_translation((x, y, shallow_z))
-            out = _subtract(out, cutter, op_id)
-
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"), 0)
             rows = int(round(_num(params.get("rows"), 0)))
@@ -146,26 +131,6 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             spacing = _num(params.get("spacing_mm"), 0)
             if count < 2 or count > 12 or diameter < 3 or diameter > 24 or spacing < diameter * 0.5:
                 issues.append(ValidationIssue("scallop_pattern", f"{op_id}: patrón de muescas inválido."))
-        elif typ == "scallop_pattern":
-            count = int(round(_num(params.get("count"))))
-            diameter = _num(params.get("diameter_mm"))
-            spacing = _num(params.get("spacing_mm"))
-            rotation_deg = _num((op.get("placement") or {}).get("rotation_deg"), 0)
-            total = (count - 1) * spacing + diameter
-            if not _fits_xy(out, x, y, total / 2, diameter / 2):
-                raise ValueError(f"{op_id}: patrón de muescas demasiado cerca del borde")
-            cutters = []
-            angle = np.radians(rotation_deg)
-            for i in range(count):
-                offset = (i - (count - 1) / 2) * spacing
-                px = x + np.cos(angle) * offset
-                py = y + np.sin(angle) * offset
-                cutter = trimesh.creation.cylinder(radius=diameter / 2, height=depth, sections=48)
-                cutter.apply_translation((px, py, z))
-                cutters.append(cutter)
-            for cutter in cutters:
-                out = _subtract(out, cutter, op_id)
-
         elif typ == "vent_hex":
             rows = int(round(_num(params.get("rows"), 0)))
             cols = int(round(_num(params.get("cols"), 0)))
@@ -344,6 +309,21 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
             bore.apply_translation((x, y, shallow_z))
             out = _subtract(out, bore, op_id)
 
+        elif typ == "pocket_rect":
+            width = _num(params.get("width_mm"))
+            height = _num(params.get("height_mm"))
+            pocket_depth = _num(params.get("depth_mm"))
+            if not _fits_xy(out, x, y, width / 2, height / 2):
+                raise ValueError(f"{op_id}: rebaje demasiado cerca del borde")
+            target = (op.get("target") or {}).get("face", "top")
+            lo_z = float(out.bounds[0][2])
+            hi_z = float(out.bounds[1][2])
+            shallow_h = pocket_depth + 0.6
+            shallow_z = (hi_z - pocket_depth / 2 + 0.3) if target == "top" else (lo_z + pocket_depth / 2 - 0.3)
+            cutter = trimesh.creation.box(extents=(width, height, shallow_h))
+            cutter.apply_translation((x, y, shallow_z))
+            out = _subtract(out, cutter, op_id)
+
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"))
             rows = int(round(_num(params.get("rows"))))
@@ -387,6 +367,23 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
                 py = y + (i - (count - 1) / 2) * spacing
                 cutter = _rotated_box(length, width, depth, rotation_deg)
                 cutter.apply_translation((x, py, z))
+                out = _subtract(out, cutter, op_id)
+
+        elif typ == "scallop_pattern":
+            count = int(round(_num(params.get("count"))))
+            diameter = _num(params.get("diameter_mm"))
+            spacing = _num(params.get("spacing_mm"))
+            rotation_deg = _num((op.get("placement") or {}).get("rotation_deg"), 0)
+            total = (count - 1) * spacing + diameter
+            if not _fits_xy(out, x, y, total / 2, diameter / 2):
+                raise ValueError(f"{op_id}: patrón de muescas demasiado cerca del borde")
+            angle = np.radians(rotation_deg)
+            for i in range(count):
+                offset = (i - (count - 1) / 2) * spacing
+                px = x + np.cos(angle) * offset
+                py = y + np.sin(angle) * offset
+                cutter = trimesh.creation.cylinder(radius=diameter / 2, height=depth, sections=48)
+                cutter.apply_translation((px, py, z))
                 out = _subtract(out, cutter, op_id)
 
         elif typ == "vent_hex":
