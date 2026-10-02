@@ -183,6 +183,90 @@ PRODUCTS = {
         "variant": {"length": 120.0, "width": 50.0, "slot_mm": 32.0},
         "min_extents": (40.0, 20.0, 2.0),
     },
+    "vertical-laptop-dock": {
+        "builder": "vertical_laptop_dock",
+        "name": "Dock vertical para portátil",
+        "default": {"length": 180.0, "depth": 90.0, "wall": 4.0, "slot": 24.0, "height": 65.0},
+        "variant": {"length": 220.0, "slot": 32.0, "height": 78.0},
+        "min_extents": (140.0, 65.0, 50.0),
+    },
+    "universal-mount-plate": {
+        "builder": "universal_mount_plate",
+        "name": "Placa universal de montaje",
+        "default": {"width": 120.0, "height": 90.0, "thickness": 5.0, "rail": 10.0},
+        "variant": {"width": 160.0, "height": 110.0, "rail": 14.0},
+        "min_extents": (80.0, 60.0, 4.0),
+    },
+    "mini-pc-mount": {
+        "builder": "mini_pc_mount",
+        "name": "Soporte mini-PC / NUC",
+        "default": {"width": 130.0, "depth": 125.0, "height": 45.0, "wall": 4.0, "lip": 16.0},
+        "variant": {"width": 155.0, "depth": 145.0, "height": 55.0},
+        "min_extents": (90.0, 80.0, 30.0),
+    },
+    "desk-grommet": {
+        "builder": "desk_grommet",
+        "name": "Pasacables de mesa",
+        "default": {"outer_d": 65.0, "inner_d": 50.0, "height": 18.0, "flange": 4.0},
+        "variant": {"outer_d": 75.0, "inner_d": 56.0, "height": 22.0},
+        "min_extents": (50.0, 50.0, 12.0),
+    },
+    "under-desk-channel": {
+        "builder": "under_desk_channel",
+        "name": "Canal bajo mesa",
+        "default": {"length": 240.0, "width": 55.0, "height": 35.0, "wall": 3.0},
+        "variant": {"length": 320.0, "width": 70.0, "height": 45.0},
+        "min_extents": (160.0, 35.0, 22.0),
+    },
+    "multi-device-dock": {
+        "builder": "multi_device_dock",
+        "name": "Peana multi-dispositivo",
+        "default": {"width": 190.0, "depth": 105.0, "height": 55.0, "wall": 4.0, "slots": 3},
+        "variant": {"width": 230.0, "height": 65.0, "slots": 4},
+        "min_extents": (130.0, 70.0, 40.0),
+    },
+    "webcam-monitor-mount": {
+        "builder": "webcam_monitor_mount",
+        "name": "Soporte webcam de monitor",
+        "default": {"width": 55.0, "depth": 45.0, "back": 35.0, "wall": 4.0, "angle_deg": 10.0},
+        "variant": {"width": 70.0, "depth": 55.0, "angle_deg": 18.0},
+        "min_extents": (35.0, 25.0, 20.0),
+    },
+    "network-switch-mount": {
+        "builder": "network_switch_mount",
+        "name": "Soporte switch de red",
+        "default": {"width": 180.0, "depth": 95.0, "height": 42.0, "wall": 4.0, "front_lip": 12.0},
+        "variant": {"width": 220.0, "depth": 115.0, "height": 50.0},
+        "min_extents": (120.0, 65.0, 28.0),
+    },
+    "electronics-box": {
+        "builder": "electronics_box",
+        "name": "Caja electrónica ventilable universal",
+        "default": {"length": 130.0, "width": 85.0, "height": 45.0, "wall": 3.0, "lid": 3.0},
+        "variant": {"length": 165.0, "width": 105.0, "height": 60.0},
+        "min_extents": (80.0, 50.0, 28.0),
+    },
+    "controller-stand": {
+        "builder": "controller_stand",
+        "name": "Soporte de mando",
+        "default": {"width": 95.0, "depth": 110.0, "height": 85.0, "wall": 5.0, "angle_deg": 28.0},
+        "variant": {"width": 110.0, "depth": 125.0, "height": 100.0, "angle_deg": 34.0},
+        "min_extents": (60.0, 65.0, 55.0),
+    },
+    "drill-template": {
+        "builder": "drill_template",
+        "name": "Plantilla de perforación",
+        "default": {"length": 160.0, "width": 45.0, "thickness": 6.0, "hole_d": 5.0, "spacing": 32.0},
+        "variant": {"length": 210.0, "width": 55.0, "spacing": 40.0},
+        "min_extents": (100.0, 28.0, 4.0),
+    },
+    "drawer-divider": {
+        "builder": "drawer_divider",
+        "name": "Divisor de cajón",
+        "default": {"length": 220.0, "height": 55.0, "thickness": 3.0, "foot": 14.0},
+        "variant": {"length": 280.0, "height": 70.0, "foot": 18.0},
+        "min_extents": (150.0, 8.0, 35.0),
+    },
 }
 
 DEFAULT_PRODUCT_VERSION = "1.0.0-beta.1"
@@ -206,4 +290,4 @@ PRODUCTS["cable-clip"]["capabilities"]["free_holes"] = True
 PRODUCTS["cable-tray"]["capabilities"]["free_holes"] = True
 
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
-assert len(CANONICAL_SLUGS) == 18
+assert len(CANONICAL_SLUGS) == 30
