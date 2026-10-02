@@ -8,15 +8,10 @@ networkx>=3.2,<4
 
 # Boolean robusta
 manifold3d==3.2.1
+supabase==2.31.0
 
 # Supabase Python stack: mantener todos los paquetes en la misma release.
 # v2.20.0 usa httpx >=0.26,<0.29.
-supabase==2.20.0
-supabase-auth==2.20.0
-storage3==2.20.0
-postgrest==2.20.0
-realtime==2.20.0
-supabase-functions==2.20.0
 httpx>=0.26,<0.29
 
 pillow==10.4.0
