@@ -267,6 +267,96 @@ PRODUCTS = {
         "variant": {"length": 280.0, "height": 70.0, "foot": 18.0},
         "min_extents": (150.0, 8.0, 35.0),
     },
+    "vesa-offset-adapter": {
+        "builder": "vesa_offset_adapter", "name": "Adaptador VESA offset",
+        "default": {"width": 150.0, "height": 120.0, "thickness": 5.0, "offset": 35.0},
+        "variant": {"width": 180.0, "offset": 55.0}, "min_extents": (120.0, 90.0, 4.0),
+    },
+    "under-desk-mount": {
+        "builder": "under_desk_mount", "name": "Montura bajo mesa universal",
+        "default": {"width": 130.0, "depth": 90.0, "height": 55.0, "wall": 4.0},
+        "variant": {"width": 170.0, "depth": 115.0}, "min_extents": (90.0, 60.0, 35.0),
+    },
+    "perforated-mount-plate": {
+        "builder": "perforated_mount_plate", "name": "Placa técnica configurable",
+        "default": {"width": 150.0, "height": 100.0, "thickness": 5.0, "boss": 12.0},
+        "variant": {"width": 190.0, "boss": 18.0}, "min_extents": (100.0, 70.0, 4.0),
+    },
+    "circular-pattern-adapter": {
+        "builder": "circular_pattern_adapter", "name": "Adaptador de patrón circular",
+        "default": {"outer_d": 100.0, "hub_d": 36.0, "thickness": 6.0, "boss_h": 8.0},
+        "variant": {"outer_d": 125.0, "hub_d": 46.0}, "min_extents": (70.0, 70.0, 10.0),
+    },
+    "phone-landscape-stand": {
+        "builder": "phone_landscape_stand", "name": "Soporte móvil horizontal / vertical",
+        "default": {"width": 150.0, "depth": 85.0, "back_h": 70.0, "wall": 4.0, "lip": 12.0},
+        "variant": {"width": 180.0, "back_h": 85.0}, "min_extents": (100.0, 55.0, 45.0),
+    },
+    "smartwatch-stand": {
+        "builder": "smartwatch_stand", "name": "Base para reloj inteligente",
+        "default": {"base_d": 80.0, "stem_h": 95.0, "stem_d": 18.0, "cradle_d": 48.0},
+        "variant": {"base_d": 95.0, "stem_h": 115.0}, "min_extents": (45.0, 45.0, 80.0),
+    },
+    "cable-comb": {
+        "builder": "cable_comb", "name": "Peine de cables",
+        "default": {"length": 90.0, "width": 22.0, "height": 14.0, "teeth": 6},
+        "variant": {"length": 120.0, "teeth": 8}, "min_extents": (60.0, 15.0, 10.0),
+    },
+    "charger-retainer": {
+        "builder": "charger_retainer", "name": "Retenedor de cargador",
+        "default": {"width": 70.0, "depth": 45.0, "height": 28.0, "wall": 3.0},
+        "variant": {"width": 90.0, "depth": 55.0}, "min_extents": (45.0, 30.0, 18.0),
+    },
+    "zip-tie-anchor": {
+        "builder": "zip_tie_anchor", "name": "Anclaje para brida reutilizable",
+        "default": {"length": 32.0, "width": 22.0, "height": 9.0, "bridge": 8.0},
+        "variant": {"length": 42.0, "bridge": 12.0}, "min_extents": (22.0, 15.0, 8.0),
+    },
+    "nvme-caddy": {
+        "builder": "nvme_caddy", "name": "Caddy SSD / NVMe externo",
+        "default": {"length": 115.0, "width": 38.0, "height": 18.0, "wall": 3.0},
+        "variant": {"length": 135.0, "width": 46.0}, "min_extents": (75.0, 25.0, 12.0),
+    },
+    "power-supply-mount": {
+        "builder": "power_supply_mount", "name": "Soporte fuente de alimentación",
+        "default": {"width": 115.0, "depth": 55.0, "height": 40.0, "wall": 4.0, "strap": 16.0},
+        "variant": {"width": 145.0, "height": 52.0}, "min_extents": (80.0, 35.0, 28.0),
+    },
+    "cold-shoe-adapter": {
+        "builder": "cold_shoe_adapter", "name": "Adaptador cold-shoe",
+        "default": {"length": 30.0, "width": 22.0, "base_t": 4.0, "post_h": 12.0},
+        "variant": {"length": 36.0, "post_h": 16.0}, "min_extents": (20.0, 14.0, 14.0),
+    },
+    "led-light-mount": {
+        "builder": "led_light_mount", "name": "Soporte de luz LED",
+        "default": {"width": 65.0, "depth": 48.0, "height": 45.0, "wall": 4.0, "tilt_deg": 15.0},
+        "variant": {"width": 80.0, "height": 58.0, "tilt_deg": 25.0}, "min_extents": (40.0, 28.0, 30.0),
+    },
+    "audio-interface-mount": {
+        "builder": "audio_interface_mount", "name": "Montura para interfaz de audio",
+        "default": {"width": 165.0, "depth": 115.0, "height": 35.0, "wall": 4.0},
+        "variant": {"width": 205.0, "depth": 135.0}, "min_extents": (110.0, 75.0, 24.0),
+    },
+    "battery-card-holder": {
+        "builder": "battery_card_holder", "name": "Organizador de baterías y tarjetas",
+        "default": {"width": 120.0, "depth": 65.0, "height": 32.0, "bays": 4},
+        "variant": {"width": 155.0, "bays": 6}, "min_extents": (80.0, 42.0, 22.0),
+    },
+    "double-wall-hook": {
+        "builder": "double_wall_hook", "name": "Gancho doble de pared",
+        "default": {"base_w": 75.0, "base_h": 60.0, "hook_d": 35.0, "hook_t": 8.0},
+        "variant": {"base_w": 95.0, "hook_d": 48.0}, "min_extents": (50.0, 25.0, 40.0),
+    },
+    "compact-wall-shelf": {
+        "builder": "compact_wall_shelf", "name": "Estante mural compacto",
+        "default": {"width": 180.0, "depth": 110.0, "back_h": 65.0, "wall": 4.0},
+        "variant": {"width": 230.0, "depth": 140.0}, "min_extents": (120.0, 75.0, 45.0),
+    },
+    "tool-holder": {
+        "builder": "tool_holder", "name": "Soporte modular de herramienta",
+        "default": {"width": 160.0, "height": 60.0, "depth": 48.0, "slots": 5},
+        "variant": {"width": 210.0, "slots": 7}, "min_extents": (105.0, 30.0, 40.0),
+    },
 }
 
 DEFAULT_PRODUCT_VERSION = "1.0.0-beta.1"
@@ -290,4 +380,4 @@ PRODUCTS["cable-clip"]["capabilities"]["free_holes"] = True
 PRODUCTS["cable-tray"]["capabilities"]["free_holes"] = True
 
 CANONICAL_SLUGS = tuple(PRODUCTS.keys())
-assert len(CANONICAL_SLUGS) == 30
+assert len(CANONICAL_SLUGS) == 48
