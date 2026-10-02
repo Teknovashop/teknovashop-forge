@@ -7,9 +7,9 @@ import numpy as np
 import trimesh
 
 PILOT_CAPABILITIES = {
-    "cable-tray": {"hole", "slot", "cutout_rect", "hole_pattern", "vent_linear", "vent_hex", "rib", "cable_channel"},
-    "vesa-adapter": {"hole", "slot", "cutout_rect", "hole_pattern", "vesa_pattern", "rib"},
-    "enclosure-ip65": {"hole", "slot", "cutout_rect", "hole_pattern", "vent_linear", "vent_hex", "rib", "cable_channel"},
+    "cable-tray": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vent_linear", "vent_hex", "rib", "wave_ribs", "cable_channel"},
+    "vesa-adapter": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vesa_pattern", "rib", "wave_ribs"},
+    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vent_linear", "vent_hex", "rib", "wave_ribs", "cable_channel"},
 }
 
 
@@ -79,6 +79,16 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             height = _num(params.get("height_mm"), 0)
             if width < 2 or height < 2:
                 issues.append(ValidationIssue("cutout_size", f"{op_id}: corte rectangular inválido."))
+        elif typ == "cutout_circle":
+            d = _num(params.get("diameter_mm"), 0)
+            if d < 4 or d > 90:
+                issues.append(ValidationIssue("cutout_circle", f"{op_id}: diámetro permitido 4–90 mm."))
+        elif typ == "counterbore":
+            through_d = _num(params.get("through_diameter_mm"), 0)
+            bore_d = _num(params.get("bore_diameter_mm"), 0)
+            bore_depth = _num(params.get("bore_depth_mm"), 0)
+            if through_d < 2 or through_d > 20 or bore_d <= through_d or bore_d > 45 or bore_depth < 0.5 or bore_depth > 12:
+                issues.append(ValidationIssue("counterbore", f"{op_id}: rebaje cilíndrico inválido."))
 
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"), 0)
@@ -113,6 +123,14 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             height = _num(params.get("height_mm"), 0)
             if length < 6 or width < 2 or height < 1 or height > 30:
                 issues.append(ValidationIssue("rib_size", f"{op_id}: refuerzo inválido."))
+        elif typ == "wave_ribs":
+            length = _num(params.get("length_mm"), 0)
+            rib_width = _num(params.get("rib_width_mm"), 0)
+            amplitude = _num(params.get("amplitude_mm"), 0)
+            count = int(round(_num(params.get("count"), 0)))
+            spacing = _num(params.get("spacing_mm"), 0)
+            if length < 10 or rib_width < 1 or rib_width > 8 or amplitude < 0.8 or amplitude > 12 or count < 3 or count > 14 or spacing < rib_width:
+                issues.append(ValidationIssue("wave_ribs", f"{op_id}: ondulación/refuerzo inválido."))
         elif typ == "cable_channel":
             length = _num(params.get("length_mm"), 0)
             width = _num(params.get("width_mm"), 0)
@@ -239,6 +257,31 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
             cutter.apply_translation((x, y, z))
             out = _subtract(out, cutter, op_id)
 
+        elif typ == "cutout_circle":
+            d = _num(params.get("diameter_mm"))
+            if not _fits_xy(out, x, y, d / 2, d / 2):
+                raise ValueError(f"{op_id}: corte circular demasiado cerca del borde")
+            cutter = trimesh.creation.cylinder(radius=d / 2, height=depth, sections=64)
+            cutter.apply_translation((x, y, z))
+            out = _subtract(out, cutter, op_id)
+
+        elif typ == "counterbore":
+            through_d = _num(params.get("through_diameter_mm"))
+            bore_d = _num(params.get("bore_diameter_mm"))
+            bore_depth = _num(params.get("bore_depth_mm"))
+            if not _fits_xy(out, x, y, bore_d / 2, bore_d / 2):
+                raise ValueError(f"{op_id}: rebaje demasiado cerca del borde")
+            through = trimesh.creation.cylinder(radius=through_d / 2, height=depth, sections=48)
+            through.apply_translation((x, y, z))
+            out = _subtract(out, through, op_id)
+            target = (op.get("target") or {}).get("face", "top")
+            lo_z = float(out.bounds[0][2])
+            hi_z = float(out.bounds[1][2])
+            shallow_h = bore_depth + 0.6
+            shallow_z = (hi_z - bore_depth / 2 + 0.3) if target == "top" else (lo_z + bore_depth / 2 - 0.3)
+            bore = trimesh.creation.cylinder(radius=bore_d / 2, height=shallow_h, sections=64)
+            bore.apply_translation((x, y, shallow_z))
+            out = _subtract(out, bore, op_id)
 
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"))
@@ -324,8 +367,26 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
                 raise ValueError(f"{op_id}: refuerzo demasiado cerca del borde")
             z_top = float(out.bounds[1][2])
             rib = _rotated_box(length, width, height, rotation_deg)
-            # 0.25 mm overlap ensures a robust manifold union with the selected top face.
             rib.apply_translation((x, y, z_top + height / 2 - 0.25))
             out = _union(out, rib, op_id)
+
+        elif typ == "wave_ribs":
+            length = _num(params.get("length_mm"))
+            rib_width = _num(params.get("rib_width_mm"))
+            amplitude = _num(params.get("amplitude_mm"))
+            count = int(round(_num(params.get("count"))))
+            spacing = _num(params.get("spacing_mm"))
+            rotation_deg = _num((op.get("placement") or {}).get("rotation_deg"), 0)
+            span = (count - 1) * spacing + rib_width
+            if not _fits_xy(out, x, y, length / 2, span / 2):
+                raise ValueError(f"{op_id}: ondulación demasiado cerca del borde")
+            z_top = float(out.bounds[1][2])
+            for i in range(count):
+                phase = (i / max(1, count - 1)) * np.pi * 2.0
+                height = max(0.8, amplitude * (0.55 + 0.45 * (np.sin(phase) + 1.0) / 2.0))
+                py = y + (i - (count - 1) / 2) * spacing
+                rib = _rotated_box(length, rib_width, height, rotation_deg)
+                rib.apply_translation((x, py, z_top + height / 2 - 0.25))
+                out = _union(out, rib, op_id)
 
     return out
