@@ -47,6 +47,15 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
     for index, op in enumerate(ops):
         op_id = str(op.get("id") or "").strip()
         typ = _op_type(op)
+        version = op.get("version", 1)
+
+        if version != 1:
+            issues.append(
+                ValidationIssue(
+                    "unsupported_operation_version",
+                    f"{op_id or index + 1}: versión de operación no soportada.",
+                )
+            )
 
         if not op_id:
             issues.append(ValidationIssue("missing_id", f"Operación {index + 1}: falta id."))
