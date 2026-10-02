@@ -94,6 +94,44 @@ for _finder, _name, _ispkg in pkgutil.iter_modules(__path__):
         if isinstance(s, str) and s.strip():
             _add_alias(s, _name)
 
+
+# --------------------- Wave 3 reusable families -----------------------
+# These builders live in one module intentionally: they share simple, audited
+# parametric primitives while still receiving distinct canonical contracts.
+try:
+    from . import _wave3_families as _w3
+
+    _wave3_builders = {
+        "vesa_shelf_adapter": _w3.build_vesa_shelf_adapter,
+        "universal_wall_mount": _w3.build_universal_wall_mount,
+        "multipattern_transition_plate": _w3.build_multipattern_transition_plate,
+        "monitor_riser": _w3.build_monitor_riser,
+        "tablet_angle_stand": _w3.build_tablet_angle_stand,
+        "microphone_desk_adapter": _w3.build_microphone_desk_adapter,
+        "broom_tool_holder": _w3.build_broom_tool_holder,
+        "controller_wall_mount": _w3.build_controller_wall_mount,
+        "speaker_wall_mount": _w3.build_speaker_wall_mount,
+        "wall_cable_clip": _w3.build_wall_cable_clip,
+        "light_clamp_block": _w3.build_light_clamp_block,
+        "cutting_guide": _w3.build_cutting_guide,
+        "parametric_spacer": _w3.build_parametric_spacer,
+        "bit_key_organizer": _w3.build_bit_key_organizer,
+        "parametric_lidded_box": _w3.build_parametric_lidded_box,
+        "stackable_box": _w3.build_stackable_box,
+        "modular_tray": _w3.build_modular_tray,
+        "desk_organizer": _w3.build_desk_organizer,
+        "modular_pen_holder": _w3.build_modular_pen_holder,
+        "hardware_box": _w3.build_hardware_box,
+        "accessory_rack": _w3.build_accessory_rack,
+        "inset_label": _w3.build_inset_label,
+        "sd_card_organizer": _w3.build_sd_card_organizer,
+        "cable_reel": _w3.build_cable_reel,
+    }
+    for _w3_name, _w3_fn in _wave3_builders.items():
+        _register(_w3_name, _w3_fn)
+except Exception:
+    pass
+
 # --------------------- Alias “humanos” adicionales -------------------
 # (kebab y snake, inglés y español, según tus modelos)
 _extra = {
