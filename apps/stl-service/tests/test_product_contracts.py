@@ -187,9 +187,9 @@ def _hash_or_bytes(mesh: trimesh.Trimesh) -> str:
     return hashlib.sha256(_stl_bytes(mesh)).hexdigest()
 
 
-def test_exactly_18_canonical_products_are_contractually_defined():
-    assert len(PRODUCTS) == 18
-    assert len(set(CANONICAL_SLUGS)) == 18
+def test_exactly_30_canonical_products_are_contractually_defined():
+    assert len(PRODUCTS) == 30
+    assert len(set(CANONICAL_SLUGS)) == 30
 
 
 def test_product_contracts_have_required_metadata():
