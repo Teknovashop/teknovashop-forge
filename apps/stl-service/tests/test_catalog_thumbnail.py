@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PIL import Image
+from PIL import Image, ImageStat
 from io import BytesIO
 import pytest
 
@@ -18,6 +18,10 @@ def test_catalog_thumbnail_is_real_png_for_canonical_geometry(slug):
     assert image.size == CANVAS
     assert image.mode == "RGB"
     assert len(data) > 5000
+    # The renderer must produce a real lit product image, not a near-flat
+    # placeholder. Keep this deliberately broad so the visual system can evolve.
+    stats = ImageStat.Stat(image)
+    assert max(stats.stddev) > 12
 
 
 def test_thumbnail_render_is_deterministic_and_cached():
