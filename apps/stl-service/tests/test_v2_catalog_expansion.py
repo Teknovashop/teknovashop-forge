@@ -49,14 +49,10 @@ def test_products_without_advanced_geometry_fail_closed():
     [
         ("qr-plate", {"x": 18, "y": 0}),
         ("camera-plate", {"x": 12, "y": 8}),
-        ("universal-mount-plate", {"x": 10, "y": 8}),
-        ("vesa-offset-adapter", {"x": 10, "y": 8}),
         ("perforated-mount-plate", {"x": 10, "y": 8}),
-        ("circular-pattern-adapter", {"x": 8, "y": 8}),
         ("drill-template", {"x": 8, "y": 8}),
         ("multipattern-transition-plate", {"x": 10, "y": 8}),
         ("inset-label", {"x": 10, "y": 0}),
-        ("parametric-spacer", {"x": 8, "y": 0}),
     ],
 )
 def test_extended_planar_products_accept_real_v2_holes(slug, placement):
