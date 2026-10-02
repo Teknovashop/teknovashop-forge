@@ -30,14 +30,10 @@ ADVANCED_CAPABILITIES = {
     "enclosure-ip65": PLATE_OPS | {"vent_linear", "vent_hex", "cable_channel"},
     "qr-plate": PLATE_OPS,
     "camera-plate": PLATE_OPS,
-    "universal-mount-plate": PLATE_OPS,
-    "vesa-offset-adapter": PLATE_OPS | {"vesa_pattern"},
     "perforated-mount-plate": PLATE_OPS,
-    "circular-pattern-adapter": PLATE_OPS,
     "drill-template": PLATE_OPS,
     "multipattern-transition-plate": PLATE_OPS,
     "inset-label": PLATE_OPS,
-    "parametric-spacer": PLATE_OPS,
 }
 
 try:
