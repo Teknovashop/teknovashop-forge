@@ -6,9 +6,6 @@ from typing import Any, Dict, Iterable, List
 import numpy as np
 import trimesh
 
-from models._booleans import difference
-
-
 PILOT_CAPABILITIES = {
     "cable-tray": {"hole", "slot", "cutout_rect"},
     "vesa-adapter": {"hole", "slot", "cutout_rect"},
@@ -119,10 +116,16 @@ def _fits_xy(mesh: trimesh.Trimesh, x: float, y: float, half_w: float, half_h: f
 
 
 def _subtract(mesh: trimesh.Trimesh, cutter: trimesh.Trimesh, op_id: str) -> trimesh.Trimesh:
-    result = difference(mesh, cutter)
+    try:
+        # V2 never uses the legacy "concatenate on boolean failure" fallback.
+        # A subtractive operation must be a real Manifold boolean or fail closed.
+        result = trimesh.boolean.difference([mesh, cutter], engine="manifold")
+    except Exception as exc:
+        raise ValueError(f"{op_id}: boolean difference failed: {exc}") from exc
+
     if not isinstance(result, trimesh.Trimesh) or not len(result.faces):
         raise ValueError(f"{op_id}: la operación no produjo una malla válida")
-    if not result.is_watertight:
+    if not result.is_watertight or not result.is_winding_consistent:
         raise ValueError(f"{op_id}: la operación produciría una malla no estanca")
     return result
 
