@@ -6,11 +6,52 @@ from typing import Any, Dict, Iterable, List
 import numpy as np
 import trimesh
 
-PILOT_CAPABILITIES = {
-    "cable-tray": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
-    "vesa-adapter": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vesa_pattern", "scallop_pattern", "rib", "boss", "wave_ribs"},
-    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
+# V2 is addressable for the full canonical catalog. Advanced operations are
+# enabled only where the geometry family has regression coverage. Products not
+# listed in ADVANCED_CAPABILITIES still support V2 versioning, parameters and
+# text, but fail closed for unsupported geometric operations.
+PLATE_OPS = {
+    "hole",
+    "slot",
+    "cutout_rect",
+    "cutout_circle",
+    "counterbore",
+    "pocket_rect",
+    "hole_pattern",
+    "scallop_pattern",
+    "rib",
+    "boss",
+    "wave_ribs",
 }
+
+ADVANCED_CAPABILITIES = {
+    "cable-tray": PLATE_OPS | {"vent_linear", "vent_hex", "cable_channel"},
+    "vesa-adapter": PLATE_OPS | {"vesa_pattern"},
+    "enclosure-ip65": PLATE_OPS | {"vent_linear", "vent_hex", "cable_channel"},
+    "qr-plate": PLATE_OPS,
+    "camera-plate": PLATE_OPS,
+    "universal-mount-plate": PLATE_OPS,
+    "vesa-offset-adapter": PLATE_OPS | {"vesa_pattern"},
+    "perforated-mount-plate": PLATE_OPS,
+    "circular-pattern-adapter": PLATE_OPS,
+    "drill-template": PLATE_OPS,
+    "multipattern-transition-plate": PLATE_OPS,
+    "inset-label": PLATE_OPS,
+    "parametric-spacer": PLATE_OPS,
+}
+
+try:
+    from model_contracts import PRODUCTS as _PRODUCTS
+    PRODUCT_CAPABILITIES = {
+        slug: set(ADVANCED_CAPABILITIES.get(slug, set()))
+        for slug in _PRODUCTS
+    }
+except Exception:
+    # Keep module importable in isolated unit contexts.
+    PRODUCT_CAPABILITIES = dict(ADVANCED_CAPABILITIES)
+
+# Backwards-compatible name used by older tests and callers.
+PILOT_CAPABILITIES = PRODUCT_CAPABILITIES
 
 
 @dataclass
@@ -36,7 +77,7 @@ def _op_type(op: Dict[str, Any]) -> str:
 
 
 def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List[Dict[str, str]]:
-    allowed = PILOT_CAPABILITIES.get(slug, set())
+    allowed = PRODUCT_CAPABILITIES.get(slug, set())
     issues: List[ValidationIssue] = []
     ops = list(operations or [])
 
