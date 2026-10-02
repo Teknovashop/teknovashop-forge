@@ -726,6 +726,7 @@ def catalog_products():
                 "capabilities": contract.get("capabilities", {}),
                 "v2_capabilities": sorted(PRODUCT_CAPABILITIES.get(slug, set())),
                 "defaults": contract["default"],
+                "variant": contract.get("variant", {}),
             }
             for slug, contract in PRODUCTS.items()
         ],
