@@ -710,6 +710,11 @@ def debug_storage(request: Request):
 @app.get("/catalog/products")
 def catalog_products():
     """Catálogo canónico versionado usado por producto, QA y clientes."""
+    try:
+        from v2_operations import PRODUCT_CAPABILITIES
+    except Exception:
+        PRODUCT_CAPABILITIES = {}
+
     return {
         "count": len(PRODUCTS),
         "products": [
@@ -719,6 +724,7 @@ def catalog_products():
                 "version": contract["version"],
                 "stage": contract["stage"],
                 "capabilities": contract.get("capabilities", {}),
+                "v2_capabilities": sorted(PRODUCT_CAPABILITIES.get(slug, set())),
                 "defaults": contract["default"],
             }
             for slug, contract in PRODUCTS.items()
@@ -825,9 +831,9 @@ def validate_v2(body: GenerateBody):
     if body.engine_version != "mesh-v2" or body.schema_version != 2:
         raise HTTPException(status_code=400, detail="Forge V2 requires mesh-v2/schema 2")
     try:
-        from v2_operations import PILOT_CAPABILITIES, validate_operations
-        if storage_slug not in PILOT_CAPABILITIES:
-            raise HTTPException(status_code=404, detail="Product not enabled in Forge V2 pilot")
+        from v2_operations import PRODUCT_CAPABILITIES, validate_operations
+        if storage_slug not in PRODUCTS:
+            raise HTTPException(status_code=404, detail="Product not found")
         issues = validate_operations(storage_slug, body.operations or [])
         return {
             "ok": not any(issue.get("level") == "error" for issue in issues),
@@ -835,7 +841,7 @@ def validate_v2(body: GenerateBody):
             "engine_version": body.engine_version,
             "schema_version": body.schema_version,
             "issues": issues,
-            "capabilities": sorted(PILOT_CAPABILITIES[storage_slug]),
+            "capabilities": sorted(PRODUCT_CAPABILITIES.get(storage_slug, set())),
         }
     except HTTPException:
         raise
@@ -942,10 +948,15 @@ def generate(body: GenerateBody, request: Request):
                 status_code=400,
                 detail="V2 operations require engine_version=mesh-v2 and schema_version=2",
             )
-        if storage_slug not in {"cable-tray", "vesa-adapter", "enclosure-ip65"}:
-            raise HTTPException(status_code=400, detail="Product is not enabled for Forge V2 operations")
         try:
-            from v2_operations import apply_operations
+            from v2_operations import PRODUCT_CAPABILITIES, apply_operations
+            if storage_slug not in PRODUCTS:
+                raise HTTPException(status_code=404, detail="Product not found")
+            if not PRODUCT_CAPABILITIES.get(storage_slug):
+                raise HTTPException(
+                    status_code=400,
+                    detail="This product supports Forge V2 versioning but has no advanced geometry operations enabled yet",
+                )
             result = apply_operations(result, storage_slug, body.operations)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"V2 operation failed: {e}")
