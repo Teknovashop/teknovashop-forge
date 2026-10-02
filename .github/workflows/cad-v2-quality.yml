@@ -43,4 +43,6 @@ jobs:
           pip check
 
       - name: CAD kernel tests
+        env:
+          PYTHONPATH: .
         run: pytest -q tests
