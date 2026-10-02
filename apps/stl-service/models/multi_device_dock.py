@@ -2,7 +2,7 @@ from __future__ import annotations
 import trimesh
 
 def build(p):
-    width=float(p.get("width",190)); depth=float(p.get("depth",105)); height=float(p.get("height",55)); wall=float(p.get("wall",4)); slots=int(p.get("slots",3))
+    width=float(p.get("width",190)); depth=float(p.get("depth",105)); height=float(p.get("height",55)); wall=float(p.get("wall",4)); slots=int(round(float(p.get("slots",3))))
     slots=max(2,min(slots,5))
     base=trimesh.creation.box(extents=(width,depth,wall)); base.apply_translation((0,0,wall/2))
     parts=[base]
