@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 import trimesh
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from models import REGISTRY, ALIASES  # registro dinámico + alias para slugs
@@ -620,6 +621,27 @@ def _require_entitlement_or_402(user_id: Optional[str], slug: str):
         )
 
 # -------------------------- Endpoints --------------------------
+
+
+@app.get("/catalog/thumbnail/{slug}.png")
+def catalogue_thumbnail(slug: str):
+    storage_slug = _slug_for_storage(_norm_slug_for_builder(slug))
+    if storage_slug not in PRODUCTS:
+        raise HTTPException(status_code=404, detail="Product not found")
+    try:
+        from catalog_thumbnail import render_product_thumbnail
+        data = render_product_thumbnail(storage_slug)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Thumbnail render failed: {exc}")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
 
 @app.get("/health")
 def health():
