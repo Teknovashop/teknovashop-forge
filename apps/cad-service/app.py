@@ -9,7 +9,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Teknovashop CAD V2", version="0.1.0")
+app = FastAPI(title="Teknovashop CAD V2", version="0.2.0")
+
+SUPPORTED_OPERATIONS = (
+    "hole",
+    "slot",
+    "cutout_rect",
+    "cutout_circle",
+    "counterbore",
+    "pocket_rect",
+    "hole_pattern",
+    "vesa_pattern",
+    "vent_linear",
+    "vent_hex",
+    "cable_channel",
+    "rib",
+    "boss",
+)
 
 
 class PlateRequest(BaseModel):
@@ -49,6 +65,14 @@ class CadOperation(BaseModel):
     bore_diameter_mm: float | None = None
     bore_depth_mm: float | None = None
     pitch_mm: float | None = None
+    count: int | None = None
+    rows: int | None = None
+    cols: int | None = None
+    spacing_mm: float | None = None
+    spacing_x_mm: float | None = None
+    spacing_y_mm: float | None = None
+    radius_mm: float | None = None
+    gap_mm: float | None = None
 
 
 class PlateDesignRequest(PlateRequest):
@@ -135,6 +159,89 @@ def apply_plate_operations(part, operations: list[CadOperation]):
                 .cutBlind(-depth)
             )
 
+        elif typ == "hole_pattern":
+            diameter = _positive(operation.diameter_mm, "diameter_mm", 2)
+            rows = int(operation.rows or 2)
+            cols = int(operation.cols or 2)
+            if rows < 1 or rows > 12 or cols < 1 or cols > 12:
+                raise ValueError("rows and cols must be between 1 and 12")
+            sx = _positive(operation.spacing_x_mm, "spacing_x_mm", 2)
+            sy = _positive(operation.spacing_y_mm, "spacing_y_mm", 2)
+            points = []
+            for row in range(rows):
+                for col in range(cols):
+                    px = x + (col - (cols - 1) / 2) * sx
+                    py = y + (row - (rows - 1) / 2) * sy
+                    points.append((px, py))
+            part = part.faces(">Z").workplane().pushPoints(points).hole(diameter)
+
+        elif typ == "vent_linear":
+            count = int(operation.count or 5)
+            if count < 1 or count > 24:
+                raise ValueError("count must be between 1 and 24")
+            length = _positive(operation.length_mm, "length_mm", 6)
+            width = _positive(operation.width_mm, "width_mm", 1.5)
+            spacing = _positive(operation.spacing_mm, "spacing_mm", width + 1)
+            if length < width:
+                raise ValueError("vent length must be >= width")
+            for index in range(count):
+                py = y + (index - (count - 1) / 2) * spacing
+                part = (
+                    part.faces(">Z")
+                    .workplane()
+                    .center(x, py)
+                    .slot2D(length, width, angle=operation.rotation_deg)
+                    .cutThruAll()
+                )
+
+        elif typ == "vent_hex":
+            rows = int(operation.rows or 2)
+            cols = int(operation.cols or 3)
+            if rows < 1 or rows > 10 or cols < 1 or cols > 12:
+                raise ValueError("rows/cols outside supported vent range")
+            radius = _positive(operation.radius_mm, "radius_mm", 1.5)
+            gap = _positive(operation.gap_mm, "gap_mm", 0.5)
+            sx = radius * 2 + gap
+            sy = radius * 1.75 + gap
+            for row in range(rows):
+                row_shift = sx / 2 if row % 2 else 0
+                for col in range(cols):
+                    px = x + (col - (cols - 1) / 2) * sx + row_shift
+                    py = y + (row - (rows - 1) / 2) * sy
+                    part = (
+                        part.faces(">Z")
+                        .workplane()
+                        .center(px, py)
+                        .polygon(6, radius * 2)
+                        .cutThruAll()
+                    )
+
+        elif typ == "cable_channel":
+            length = _positive(operation.length_mm, "length_mm", 6)
+            width = _positive(operation.width_mm, "width_mm", 2)
+            if length < width:
+                raise ValueError("channel length must be >= width")
+            part = (
+                part.faces(">Z")
+                .workplane()
+                .center(x, y)
+                .slot2D(length, width, angle=operation.rotation_deg)
+                .cutThruAll()
+            )
+
+        elif typ == "rib":
+            length = _positive(operation.length_mm, "length_mm", 4)
+            width = _positive(operation.width_mm, "width_mm", 1.5)
+            height = _positive(operation.height_mm, "height_mm", 1)
+            part = (
+                part.faces(">Z")
+                .workplane()
+                .center(x, y)
+                .transformed(rotate=(0, 0, operation.rotation_deg))
+                .rect(length, width)
+                .extrude(height, combine=True)
+            )
+
         elif typ == "vesa_pattern":
             pitch = _positive(operation.pitch_mm, "pitch_mm", 20)
             diameter = _positive(operation.diameter_mm, "diameter_mm", 3)
@@ -189,6 +296,7 @@ def health():
         "service": "teknovashop-cad-v2",
         "engine": "cadquery",
         "cadquery_version": cq.__version__,
+        "operations": list(SUPPORTED_OPERATIONS),
     }
 
 
