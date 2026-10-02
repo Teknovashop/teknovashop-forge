@@ -182,6 +182,9 @@ class GenerateBody(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     holes: Optional[Iterable[Dict[str, Any]]] = None
     text_ops: Optional[list[TextOp]] = None
+    operations: Optional[list[Dict[str, Any]]] = None
+    engine_version: str = "mesh-v1"
+    schema_version: int = 1
     model: Optional[str] = None   # compat
     user_id: Optional[str] = None # gate
 
@@ -238,11 +241,16 @@ def _make_design_manifest(
     text_ops: List[Dict[str, Any]],
     object_path: str,
     stl_bytes: bytes,
+    engine_version: str = "mesh-v1",
+    schema_version: int = 1,
+    operations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Construye el manifiesto reproducible de una generación sin I/O."""
     product = PRODUCTS.get(storage_slug, {})
     return {
-        "schema": "teknovashop.design.v1",
+        "schema": "teknovashop.design.v2" if schema_version == 2 else "teknovashop.design.v1",
+        "engine_version": engine_version,
+        "schema_version": schema_version,
         "design_id": design_id,
         "generated_at": generated_at.isoformat(),
         "product": {
@@ -255,6 +263,7 @@ def _make_design_manifest(
         "parameters": dict(params),
         "holes": list(holes),
         "text_ops": list(text_ops),
+        "operations": list(operations or []),
         "artifact": {
             "format": "stl",
             "units": "mm",
@@ -787,6 +796,31 @@ def debug_model_audit(request: Request, slug: Optional[str] = None):
     }
 
 
+
+@app.post("/v2/validate")
+def validate_v2(body: GenerateBody):
+    storage_slug = _slug_for_storage(_norm_slug_for_builder(body.slug or body.model or ""))
+    if body.engine_version != "mesh-v2" or body.schema_version != 2:
+        raise HTTPException(status_code=400, detail="Forge V2 requires mesh-v2/schema 2")
+    try:
+        from v2_operations import PILOT_CAPABILITIES, validate_operations
+        if storage_slug not in PILOT_CAPABILITIES:
+            raise HTTPException(status_code=404, detail="Product not enabled in Forge V2 pilot")
+        issues = validate_operations(storage_slug, body.operations or [])
+        return {
+            "ok": not any(issue.get("level") == "error" for issue in issues),
+            "slug": storage_slug,
+            "engine_version": body.engine_version,
+            "schema_version": body.schema_version,
+            "issues": issues,
+            "capabilities": sorted(PILOT_CAPABILITIES[storage_slug]),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"V2 validation error: {e}")
+
+
 @app.post("/generate")
 def generate(body: GenerateBody, request: Request):
     # Identity must come from a verified Supabase access token. Never trust
@@ -880,6 +914,20 @@ def generate(body: GenerateBody, request: Request):
                 detail=f"Text operation failed: {e}",
             )
 
+    if body.operations:
+        if body.engine_version != "mesh-v2" or body.schema_version != 2:
+            raise HTTPException(
+                status_code=400,
+                detail="V2 operations require engine_version=mesh-v2 and schema_version=2",
+            )
+        if storage_slug not in {"cable-tray", "vesa-adapter", "enclosure-ip65"}:
+            raise HTTPException(status_code=400, detail="Product is not enabled for Forge V2 operations")
+        try:
+            from v2_operations import apply_operations
+            result = apply_operations(result, storage_slug, body.operations)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"V2 operation failed: {e}")
+
     stl_bytes, maybe_name = _as_stl_bytes(result)
 
     product = PRODUCTS.get(storage_slug, {})
@@ -906,6 +954,9 @@ def generate(body: GenerateBody, request: Request):
         text_ops=_text_ops_for_manifest(body),
         object_path=object_path,
         stl_bytes=stl_bytes,
+        engine_version=body.engine_version,
+        schema_version=body.schema_version,
+        operations=list(body.operations or []),
     )
     stl_sha256 = manifest["artifact"]["sha256"]
     manifest_bytes = json.dumps(
