@@ -14,6 +14,7 @@ from models import REGISTRY
 
 
 CANVAS = (960, 720)
+SUPERSAMPLE = 2
 
 
 def _rotation_matrix() -> np.ndarray:
@@ -47,24 +48,43 @@ def _as_mesh(value) -> trimesh.Trimesh:
 
 
 def _background(size: tuple[int, int]) -> Image.Image:
-    w, h = size
-    image = Image.new("RGB", size, (7, 19, 33))
-    px = image.load()
-    for y in range(h):
-        t = y / max(1, h - 1)
-        # Deep technical navy gradient.
-        r = int(7 + 5 * t)
-        g = int(19 + 13 * t)
-        b = int(33 + 22 * t)
-        for x in range(w):
-            px[x, y] = (r, g, b)
+    """Premium neutral technical backdrop.
 
+    Rendered with numpy instead of per-pixel Python loops so we can afford
+    supersampling without making catalogue responses slow.
+    """
+    w, h = size
+    yy, xx = np.mgrid[0:h, 0:w]
+    ny = yy / max(1, h - 1)
+    nx = xx / max(1, w - 1)
+
+    top = np.array([8.0, 20.0, 34.0])
+    bottom = np.array([12.0, 31.0, 49.0])
+    rgb = top[None, None, :] * (1.0 - ny[..., None]) + bottom[None, None, :] * ny[..., None]
+
+    # Soft cyan studio glow behind the model, plus a restrained vignette.
+    glow = np.exp(
+        -(
+            ((nx - 0.62) / 0.34) ** 2
+            + ((ny - 0.30) / 0.30) ** 2
+        )
+    )
+    rgb += glow[..., None] * np.array([9.0, 22.0, 31.0])
+
+    dx = (nx - 0.5) / 0.72
+    dy = (ny - 0.48) / 0.76
+    vignette = np.clip((dx * dx + dy * dy) * 0.22, 0.0, 0.22)
+    rgb *= (1.0 - vignette[..., None])
+
+    image = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB")
     draw = ImageDraw.Draw(image, "RGBA")
-    # Very restrained engineering grid.
-    for x in range(0, w, 48):
-        draw.line((x, 0, x, h), fill=(96, 165, 250, 12), width=1)
-    for y in range(0, h, 48):
-        draw.line((0, y, w, y), fill=(96, 165, 250, 12), width=1)
+
+    # Fine engineering grid kept deliberately subtle.
+    grid = 64 * SUPERSAMPLE
+    for x in range(0, w, grid):
+        draw.line((x, 0, x, h), fill=(116, 196, 255, 9), width=1)
+    for y in range(0, h, grid):
+        draw.line((0, y, w, y), fill=(116, 196, 255, 9), width=1)
     return image
 
 
@@ -76,14 +96,14 @@ def _project(mesh: trimesh.Trimesh, width: int, height: int):
 
     xy = rotated[:, :2]
     span = np.maximum(xy.max(axis=0) - xy.min(axis=0), 1e-6)
-    scale = min((width * 0.66) / span[0], (height * 0.64) / span[1])
+    scale = min((width * 0.72) / span[0], (height * 0.68) / span[1])
     projected = xy * scale
     projected[:, 0] += width * 0.5
-    projected[:, 1] = height * 0.48 - projected[:, 1]
+    projected[:, 1] = height * 0.49 - projected[:, 1]
     return rotated, projected
 
 
-def _face_indices(mesh: trimesh.Trimesh, maximum: int = 3200) -> Iterable[int]:
+def _face_indices(mesh: trimesh.Trimesh, maximum: int = 5200) -> Iterable[int]:
     count = len(mesh.faces)
     if count <= maximum:
         return range(count)
@@ -106,12 +126,16 @@ def render_product_thumbnail(slug: str) -> bytes:
     if not len(mesh.vertices) or not len(mesh.faces):
         raise ValueError("Empty catalogue mesh")
 
-    width, height = CANVAS
-    image = _background(CANVAS)
+    output_width, output_height = CANVAS
+    width = output_width * SUPERSAMPLE
+    height = output_height * SUPERSAMPLE
+    render_size = (width, height)
+
+    image = _background(render_size)
     rotated, projected = _project(mesh, width, height)
 
     # Soft grounding shadow, shared across every model.
-    shadow_layer = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
+    shadow_layer = Image.new("RGBA", render_size, (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow_layer, "RGBA")
     bb = projected.min(axis=0), projected.max(axis=0)
     object_w = max(80.0, float(bb[1][0] - bb[0][0]))
@@ -124,12 +148,16 @@ def render_product_thumbnail(slug: str) -> bytes:
         ),
         fill=(0, 0, 0, 85),
     )
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(18))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(24 * SUPERSAMPLE))
     image = Image.alpha_composite(image.convert("RGBA"), shadow_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
-    light = np.array([-0.35, -0.45, 0.82], dtype=float)
-    light /= np.linalg.norm(light)
+    key_light = np.array([-0.38, -0.52, 0.76], dtype=float)
+    key_light /= np.linalg.norm(key_light)
+    fill_light = np.array([0.68, 0.10, 0.38], dtype=float)
+    fill_light /= np.linalg.norm(fill_light)
+    rim_light = np.array([0.10, 0.72, 0.68], dtype=float)
+    rim_light /= np.linalg.norm(rim_light)
 
     faces = np.asarray(mesh.faces, dtype=int)
     normals = np.asarray(mesh.face_normals, dtype=float) @ _rotation_matrix().T
@@ -142,14 +170,20 @@ def render_product_thumbnail(slug: str) -> bytes:
         face = faces[face_index]
         points = [tuple(map(float, projected[v])) for v in face]
         normal = normals[face_index]
-        intensity = float(np.clip(np.dot(normal, light) * 0.5 + 0.55, 0.18, 1.0))
-        fill = (
-            int(105 + intensity * 86),
-            int(132 + intensity * 78),
-            int(162 + intensity * 73),
-            255,
+        key = max(0.0, float(np.dot(normal, key_light)))
+        fill_amt = max(0.0, float(np.dot(normal, fill_light)))
+        rim = max(0.0, float(np.dot(normal, rim_light)))
+
+        # Cool matte polymer / anodized-metal language shared by every piece.
+        intensity = float(np.clip(0.32 + key * 0.50 + fill_amt * 0.14, 0.22, 0.98))
+        base = np.array([132.0, 154.0, 178.0])
+        highlight = np.array([82.0, 91.0, 96.0]) * intensity
+        cyan_rim = np.array([8.0, 23.0, 30.0]) * rim
+        rgb = np.clip(base + highlight + cyan_rim, 0, 245)
+        draw.polygon(
+            points,
+            fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
         )
-        draw.polygon(points, fill=fill)
 
     # Exact mesh silhouette/feature edges, in the same cyan language as Forge.
     try:
@@ -160,14 +194,21 @@ def render_product_thumbnail(slug: str) -> bytes:
         for a, b in edges:
             pa = tuple(map(float, projected[a]))
             pb = tuple(map(float, projected[b]))
-            draw.line((pa, pb), fill=(139, 233, 255, 48), width=1)
+            draw.line(
+                (pa, pb),
+                fill=(155, 235, 255, 38),
+                width=max(1, SUPERSAMPLE),
+            )
     except Exception:
         pass
 
-    # Consistent catalogue chip — no marketing claims, only canonical product state.
-    draw.rounded_rectangle((38, 38, 177, 73), radius=13, fill=(6, 17, 29, 210), outline=(139, 233, 255, 48), width=1)
-    draw.text((56, 49), "FORGE  PARAMETRIC", fill=(139, 233, 255, 220))
+    # Downsample once at the end. This removes jagged triangle edges and gives
+    # the generated catalogue pieces a consistent studio-render finish.
+    image = image.convert("RGB").resize(
+        CANVAS,
+        Image.Resampling.LANCZOS,
+    )
 
     out = BytesIO()
-    image.convert("RGB").save(out, format="PNG", optimize=True)
+    image.save(out, format="PNG", optimize=True)
     return out.getvalue()
