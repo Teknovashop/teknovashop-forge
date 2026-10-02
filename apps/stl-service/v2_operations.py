@@ -7,9 +7,9 @@ import numpy as np
 import trimesh
 
 PILOT_CAPABILITIES = {
-    "cable-tray": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vent_linear", "vent_hex", "rib", "wave_ribs", "cable_channel"},
-    "vesa-adapter": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vesa_pattern", "rib", "wave_ribs"},
-    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "hole_pattern", "vent_linear", "vent_hex", "rib", "wave_ribs", "cable_channel"},
+    "cable-tray": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
+    "vesa-adapter": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vesa_pattern", "scallop_pattern", "rib", "boss", "wave_ribs"},
+    "enclosure-ip65": {"hole", "slot", "cutout_rect", "cutout_circle", "counterbore", "pocket_rect", "hole_pattern", "vent_linear", "vent_hex", "scallop_pattern", "rib", "boss", "wave_ribs", "cable_channel"},
 }
 
 
@@ -99,6 +99,12 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             if through_d < 2 or through_d > 20 or bore_d <= through_d or bore_d > 45 or bore_depth < 0.5 or bore_depth > 12:
                 issues.append(ValidationIssue("counterbore", f"{op_id}: rebaje cilíndrico inválido."))
 
+        elif typ == "pocket_rect":
+            width = _num(params.get("width_mm"), 0)
+            height = _num(params.get("height_mm"), 0)
+            pocket_depth = _num(params.get("depth_mm"), 0)
+            if width < 4 or height < 4 or pocket_depth < 0.4 or pocket_depth > 12:
+                issues.append(ValidationIssue("pocket_rect", f"{op_id}: rebaje rectangular inválido."))
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"), 0)
             rows = int(round(_num(params.get("rows"), 0)))
@@ -119,6 +125,12 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             spacing = _num(params.get("spacing_mm"), 0)
             if count < 2 or count > 16 or length < 6 or width < 2 or spacing < width:
                 issues.append(ValidationIssue("vent_linear", f"{op_id}: ventilación lineal inválida."))
+        elif typ == "scallop_pattern":
+            count = int(round(_num(params.get("count"), 0)))
+            diameter = _num(params.get("diameter_mm"), 0)
+            spacing = _num(params.get("spacing_mm"), 0)
+            if count < 2 or count > 12 or diameter < 3 or diameter > 24 or spacing < diameter * 0.5:
+                issues.append(ValidationIssue("scallop_pattern", f"{op_id}: patrón de muescas inválido."))
         elif typ == "vent_hex":
             rows = int(round(_num(params.get("rows"), 0)))
             cols = int(round(_num(params.get("cols"), 0)))
@@ -132,6 +144,11 @@ def validate_operations(slug: str, operations: Iterable[Dict[str, Any]]) -> List
             height = _num(params.get("height_mm"), 0)
             if length < 6 or width < 2 or height < 1 or height > 30:
                 issues.append(ValidationIssue("rib_size", f"{op_id}: refuerzo inválido."))
+        elif typ == "boss":
+            diameter = _num(params.get("diameter_mm"), 0)
+            height = _num(params.get("height_mm"), 0)
+            if diameter < 4 or diameter > 40 or height < 1 or height > 30:
+                issues.append(ValidationIssue("boss", f"{op_id}: boss cilíndrico inválido."))
         elif typ == "wave_ribs":
             length = _num(params.get("length_mm"), 0)
             rib_width = _num(params.get("rib_width_mm"), 0)
@@ -292,6 +309,21 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
             bore.apply_translation((x, y, shallow_z))
             out = _subtract(out, bore, op_id)
 
+        elif typ == "pocket_rect":
+            width = _num(params.get("width_mm"))
+            height = _num(params.get("height_mm"))
+            pocket_depth = _num(params.get("depth_mm"))
+            if not _fits_xy(out, x, y, width / 2, height / 2):
+                raise ValueError(f"{op_id}: rebaje demasiado cerca del borde")
+            target = (op.get("target") or {}).get("face", "top")
+            lo_z = float(out.bounds[0][2])
+            hi_z = float(out.bounds[1][2])
+            shallow_h = pocket_depth + 0.6
+            shallow_z = (hi_z - pocket_depth / 2 + 0.3) if target == "top" else (lo_z + pocket_depth / 2 - 0.3)
+            cutter = trimesh.creation.box(extents=(width, height, shallow_h))
+            cutter.apply_translation((x, y, shallow_z))
+            out = _subtract(out, cutter, op_id)
+
         elif typ == "hole_pattern":
             d = _num(params.get("diameter_mm"))
             rows = int(round(_num(params.get("rows"))))
@@ -337,6 +369,23 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
                 cutter.apply_translation((x, py, z))
                 out = _subtract(out, cutter, op_id)
 
+        elif typ == "scallop_pattern":
+            count = int(round(_num(params.get("count"))))
+            diameter = _num(params.get("diameter_mm"))
+            spacing = _num(params.get("spacing_mm"))
+            rotation_deg = _num((op.get("placement") or {}).get("rotation_deg"), 0)
+            total = (count - 1) * spacing + diameter
+            if not _fits_xy(out, x, y, total / 2, diameter / 2):
+                raise ValueError(f"{op_id}: patrón de muescas demasiado cerca del borde")
+            angle = np.radians(rotation_deg)
+            for i in range(count):
+                offset = (i - (count - 1) / 2) * spacing
+                px = x + np.cos(angle) * offset
+                py = y + np.sin(angle) * offset
+                cutter = trimesh.creation.cylinder(radius=diameter / 2, height=depth, sections=48)
+                cutter.apply_translation((px, py, z))
+                out = _subtract(out, cutter, op_id)
+
         elif typ == "vent_hex":
             rows = int(round(_num(params.get("rows"))))
             cols = int(round(_num(params.get("cols"))))
@@ -378,6 +427,19 @@ def apply_operations(mesh: trimesh.Trimesh, slug: str, operations: Iterable[Dict
             rib = _rotated_box(length, width, height, rotation_deg)
             rib.apply_translation((x, y, z_top + height / 2 - 0.25))
             out = _union(out, rib, op_id)
+
+        elif typ == "boss":
+            diameter = _num(params.get("diameter_mm"))
+            height = _num(params.get("height_mm"))
+            if not _fits_xy(out, x, y, diameter / 2, diameter / 2):
+                raise ValueError(f"{op_id}: boss demasiado cerca del borde")
+            target = (op.get("target") or {}).get("face", "top")
+            lo_z = float(out.bounds[0][2])
+            hi_z = float(out.bounds[1][2])
+            boss = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=56)
+            boss_z = (hi_z + height / 2 - 0.25) if target == "top" else (lo_z - height / 2 + 0.25)
+            boss.apply_translation((x, y, boss_z))
+            out = _union(out, boss, op_id)
 
         elif typ == "wave_ribs":
             length = _num(params.get("length_mm"))
