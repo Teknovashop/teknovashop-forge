@@ -5,6 +5,7 @@ from io import BytesIO
 import pytest
 
 from catalog_thumbnail import CANVAS, render_product_thumbnail
+from model_contracts import PRODUCTS
 
 
 @pytest.mark.parametrize(
@@ -43,3 +44,13 @@ def test_generated_thumbnail_uses_bright_studio_language():
 
     assert corner_mean > 150
     assert darkest < 90
+
+
+@pytest.mark.parametrize("slug", sorted(PRODUCTS))
+def test_every_canonical_product_has_renderable_catalog_thumbnail(slug):
+    data = render_product_thumbnail(slug)
+    assert data.startswith(b"\x89PNG\r\n\x1a\n"), slug
+    image = Image.open(BytesIO(data))
+    assert image.size == CANVAS, slug
+    assert image.mode == "RGB", slug
+    assert len(data) > 5000, slug
