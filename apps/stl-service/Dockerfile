@@ -23,6 +23,10 @@ RUN python -m pip install --upgrade pip \
 # Copiar el resto del código
 COPY . .
 
+# Renderizar las 72 miniaturas durante el build. En producción se sirven desde
+# el filesystem de la imagen y no dependen de CPU/cold-start por petición.
+RUN python prewarm_catalog_thumbnails.py
+
 ENV PORT=10000
 EXPOSE 10000
 
