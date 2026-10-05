@@ -12,6 +12,8 @@ from app import (
     build_product_design,
     ProductDesignRequest,
     CAD_PRODUCT_PROFILES,
+    CAD_ENCLOSURE_PROFILES,
+    build_enclosure_product,
     health,
 )
 
@@ -281,3 +283,63 @@ def test_cad_product_adapter_fails_closed_for_unknown_product():
 
     with pytest.raises(ValueError, match="not enabled"):
         build_product_design("router-mount", ProductDesignRequest())
+
+
+
+def test_cad_enclosure_family_builds_valid_body_and_lid():
+    assert {"enclosure-ip65", "electronics-box"}.issubset(CAD_ENCLOSURE_PROFILES)
+
+    for slug in CAD_ENCLOSURE_PROFILES:
+        body, lid = build_enclosure_product(slug, ProductDesignRequest())
+        assert body.val().isValid(), slug
+        assert lid.val().isValid(), slug
+        assert body.val().Volume() > 0, slug
+        assert lid.val().Volume() > 0, slug
+
+
+def test_cad_enclosure_body_is_hollow_and_lid_accepts_operations():
+    same_params = {"length": 150, "width": 95, "height": 50, "wall": 3}
+    plain_body, plain_lid = build_enclosure_product(
+        "electronics-box",
+        ProductDesignRequest(params=same_params),
+    )
+    body, vented_lid = build_enclosure_product(
+        "electronics-box",
+        ProductDesignRequest(
+            params=same_params,
+            operations=[
+                CadOperation(
+                    type="vent_linear",
+                    x=0,
+                    y=0,
+                    count=5,
+                    length_mm=35,
+                    width_mm=3,
+                    spacing_mm=8,
+                ),
+                CadOperation(
+                    type="hole",
+                    x=30,
+                    y=20,
+                    diameter_mm=5,
+                ),
+            ],
+        ),
+    )
+
+    assert body.val().isValid()
+    assert vented_lid.val().isValid()
+    assert vented_lid.val().Volume() < plain_lid.val().Volume()
+
+    # A hollow body must contain substantially less material than its outer box.
+    outer_volume = 150 * 95 * 50
+    assert plain_body.val().Volume() == body.val().Volume()
+    assert body.val().Volume() < outer_volume * 0.5
+    assert body.val().Volume() > 0
+
+
+def test_cad_enclosure_family_fails_closed_for_unknown_product():
+    import pytest
+
+    with pytest.raises(ValueError, match="enclosure family"):
+        build_enclosure_product("router-mount", ProductDesignRequest())

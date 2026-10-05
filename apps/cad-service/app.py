@@ -74,6 +74,24 @@ CAD_PRODUCT_PROFILES = {
     },
 }
 
+CAD_ENCLOSURE_PROFILES = {
+    "enclosure-ip65": {
+        "length": "length",
+        "width": "width",
+        "height": "height",
+        "wall": "wall",
+        "lid_thickness": "lid_thickness",
+        "lid_gap": "lid_gap",
+    },
+    "electronics-box": {
+        "length": "length",
+        "width": "width",
+        "height": "height",
+        "wall": "wall",
+        "lid_thickness": "lid",
+        "lid_gap": None,
+    },
+}
 
 
 class PlateRequest(BaseModel):
@@ -377,6 +395,78 @@ def build_product_design(slug: str, body: ProductDesignRequest):
     return apply_plate_operations(base, body.operations)
 
 
+
+
+def build_enclosure_body_from_params(params: dict[str, float], profile: dict[str, str | None]):
+    length = float(params[profile["length"]])
+    width = float(params[profile["width"]])
+    height = float(params[profile["height"]])
+    wall = float(params[profile["wall"]])
+
+    if min(length, width, height) <= 0:
+        raise ValueError("enclosure dimensions must be positive")
+    if wall < 1.0:
+        raise ValueError("wall must be >= 1.0")
+    if length <= wall * 2 + 4 or width <= wall * 2 + 4 or height <= wall + 4:
+        raise ValueError("wall leaves insufficient internal volume")
+
+    outer = cq.Workplane("XY").box(length, width, height)
+    inner_height = height - wall
+    inner = (
+        cq.Workplane("XY")
+        .box(length - 2 * wall, width - 2 * wall, inner_height)
+        .translate((0, 0, wall / 2))
+    )
+    body = outer.cut(inner)
+
+    solid = body.val()
+    if not solid.isValid() or solid.Volume() <= 0:
+        raise ValueError("enclosure body produced invalid B-Rep")
+    return body
+
+
+def build_enclosure_lid_from_params(
+    params: dict[str, float],
+    profile: dict[str, str | None],
+    operations: list[CadOperation],
+):
+    length = float(params[profile["length"]])
+    width = float(params[profile["width"]])
+    lid_thickness = float(params[profile["lid_thickness"]])
+    lid_gap_key = profile.get("lid_gap")
+    lid_gap = float(params.get(lid_gap_key, 1.0)) if lid_gap_key else 1.0
+
+    lid_length = length - max(0.0, lid_gap) * 2
+    lid_width = width - max(0.0, lid_gap) * 2
+    if lid_length <= 10 or lid_width <= 10 or lid_thickness < 1:
+        raise ValueError("invalid enclosure lid dimensions")
+
+    lid = build_plate(
+        PlateRequest(
+            width=lid_length,
+            height=lid_width,
+            thickness=lid_thickness,
+            corner_radius=min(5.0, min(lid_length, lid_width) * 0.03),
+            chamfer=min(0.8, max(0.0, lid_thickness / 3)),
+        )
+    )
+    return apply_plate_operations(lid, operations)
+
+
+def build_enclosure_product(
+    slug: str,
+    body: ProductDesignRequest,
+):
+    profile = CAD_ENCLOSURE_PROFILES.get(slug)
+    if not profile:
+        raise ValueError("product is not enabled for CAD V2 enclosure family")
+
+    params = _canonical_product_params(slug, body.params)
+    enclosure = build_enclosure_body_from_params(params, profile)
+    lid = build_enclosure_lid_from_params(params, profile, body.operations)
+    return enclosure, lid
+
+
 @app.get("/health")
 def health():
     return {
@@ -386,6 +476,7 @@ def health():
         "cadquery_version": cq.__version__,
         "operations": list(SUPPORTED_OPERATIONS),
         "product_profiles": sorted(CAD_PRODUCT_PROFILES),
+        "enclosure_profiles": sorted(CAD_ENCLOSURE_PROFILES),
     }
 
 
@@ -465,3 +556,42 @@ def product_design_step(slug: str, body: ProductDesignRequest):
         return Response(data, media_type="application/step")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"CAD product generation failed: {exc}") from exc
+
+
+@app.post("/v2/enclosure/{slug}/body/stl")
+def enclosure_body_stl(slug: str, body: ProductDesignRequest):
+    try:
+        enclosure, _ = build_enclosure_product(slug, body)
+        with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
+            cq.exporters.export(enclosure, tmp.name, exportType="STL")
+            tmp.seek(0)
+            data = tmp.read()
+        return Response(data, media_type="model/stl")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAD enclosure body failed: {exc}") from exc
+
+
+@app.post("/v2/enclosure/{slug}/lid/stl")
+def enclosure_lid_stl(slug: str, body: ProductDesignRequest):
+    try:
+        _, lid = build_enclosure_product(slug, body)
+        with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
+            cq.exporters.export(lid, tmp.name, exportType="STL")
+            tmp.seek(0)
+            data = tmp.read()
+        return Response(data, media_type="model/stl")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAD enclosure lid failed: {exc}") from exc
+
+
+@app.post("/v2/enclosure/{slug}/lid/step")
+def enclosure_lid_step(slug: str, body: ProductDesignRequest):
+    try:
+        _, lid = build_enclosure_product(slug, body)
+        with tempfile.NamedTemporaryFile(suffix=".step") as tmp:
+            cq.exporters.export(lid, tmp.name, exportType="STEP")
+            tmp.seek(0)
+            data = tmp.read()
+        return Response(data, media_type="application/step")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAD enclosure lid failed: {exc}") from exc
