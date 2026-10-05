@@ -16,7 +16,7 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
-CACHE_VERSION = "studio-v5"
+CACHE_VERSION = "studio-v6"
 CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
 
 
@@ -82,56 +82,33 @@ def _as_mesh(value) -> trimesh.Trimesh:
 
 
 def _background(size: tuple[int, int]) -> Image.Image:
-    """Bright studio backdrop aligned with Teknovashop's professional renders.
-
-    The generated geometry must feel like the same product family as the
-    hand-authored Studio Render cards: icy blue light, restrained technical
-    grid and enough contrast for dark product geometry.
-    """
+    """Clean commercial studio backdrop for generated product photography."""
     w, h = size
     yy, xx = np.mgrid[0:h, 0:w]
     ny = yy / max(1, h - 1)
     nx = xx / max(1, w - 1)
 
-    top = np.array([236.0, 247.0, 255.0])
-    bottom = np.array([183.0, 218.0, 246.0])
+    top = np.array([240.0, 247.0, 253.0])
+    bottom = np.array([163.0, 199.0, 229.0])
     rgb = top[None, None, :] * (1.0 - ny[..., None]) + bottom[None, None, :] * ny[..., None]
 
-    # Broad white key light from upper-left and cool blue bloom behind object.
-    key_glow = np.exp(
+    center_glow = np.exp(
         -(
-            ((nx - 0.26) / 0.34) ** 2
-            + ((ny - 0.18) / 0.30) ** 2
+            ((nx - 0.55) / 0.48) ** 2
+            + ((ny - 0.34) / 0.40) ** 2
         )
     )
-    blue_glow = np.exp(
-        -(
-            ((nx - 0.72) / 0.38) ** 2
-            + ((ny - 0.38) / 0.40) ** 2
-        )
-    )
-    rgb += key_glow[..., None] * np.array([18.0, 18.0, 18.0])
-    rgb += blue_glow[..., None] * np.array([-8.0, 6.0, 18.0])
+    rgb += center_glow[..., None] * np.array([4.0, 8.0, 16.0])
 
-    # Keep the edges slightly cooler/darker so cards remain visually framed.
-    dx = (nx - 0.5) / 0.78
-    dy = (ny - 0.47) / 0.82
-    vignette = np.clip((dx * dx + dy * dy) * 0.12, 0.0, 0.12)
+    dx = (nx - 0.5) / 0.8
+    dy = (ny - 0.45) / 0.85
+    vignette = np.clip((dx * dx + dy * dy) * 0.10, 0.0, 0.10)
     rgb *= (1.0 - vignette[..., None])
 
     image = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB")
     draw = ImageDraw.Draw(image, "RGBA")
-
-    # Commercial cards should not read as a CAD viewport. Keep only a
-    # barely-visible blueprint rhythm and a soft studio horizon.
-    grid = 96 * SUPERSAMPLE
-    for x in range(0, w, grid):
-        draw.line((x, 0, x, h), fill=(40, 112, 170, 6), width=1)
-    for y in range(0, h, grid):
-        draw.line((0, y, w, y), fill=(40, 112, 170, 6), width=1)
-
     horizon = int(h * 0.72)
-    draw.line((0, horizon, w, horizon), fill=(255, 255, 255, 92), width=2)
+    draw.line((0, horizon, w, horizon), fill=(255, 255, 255, 88), width=2)
     return image
 
 
@@ -212,12 +189,11 @@ def render_product_thumbnail(slug: str) -> bytes:
     draw = ImageDraw.Draw(image, "RGBA")
     object_mask = Image.new("L", render_size, 0)
     object_mask_draw = ImageDraw.Draw(object_mask)
-    key_light = np.array([-0.42, -0.58, 0.70], dtype=float)
+
+    key_light = np.array([-0.60, -0.50, 0.62], dtype=float)
     key_light /= np.linalg.norm(key_light)
-    fill_light = np.array([0.74, 0.18, 0.30], dtype=float)
+    fill_light = np.array([0.65, 0.20, 0.25], dtype=float)
     fill_light /= np.linalg.norm(fill_light)
-    rim_light = np.array([0.06, 0.74, 0.67], dtype=float)
-    rim_light /= np.linalg.norm(rim_light)
     view_dir = np.array([0.0, 0.0, 1.0], dtype=float)
     half_vec = key_light + view_dir
     half_vec /= np.linalg.norm(half_vec)
@@ -233,65 +209,41 @@ def render_product_thumbnail(slug: str) -> bytes:
         face = faces[face_index]
         points = [tuple(map(float, projected[v])) for v in face]
         normal = normals[face_index]
-        # Use two-sided diffuse terms. The catalogue renderer is a product
-        # presentation layer, not a diagnostic normal viewer; opposite winding
-        # on coplanar triangles must not create visible triangular patches.
-        key = abs(float(np.dot(normal, key_light)))
-        fill_amt = abs(float(np.dot(normal, fill_light)))
-        rim = abs(float(np.dot(normal, rim_light)))
 
-        # Dark anodized-metal / technical polymer language matching the
-        # professional product cards. The brighter background provides the
-        # separation, while specular-like lighting keeps geometry readable.
-        # Product-style dark anodized material. Keep the body genuinely dark
-        # and let controlled diffuse/specular light reveal form, matching the
-        # established Studio Render cards instead of a CAD viewport.
-        diffuse = float(np.clip(0.08 + key * 0.38 + fill_amt * 0.08, 0.05, 0.58))
-        specular = abs(float(np.dot(normal, half_vec))) ** 24
-        base = np.array([5.0, 8.0, 12.0])
-        diffuse_rgb = np.array([46.0, 54.0, 64.0]) * diffuse
-        specular_rgb = np.array([138.0, 152.0, 168.0]) * specular
-        cyan_rim = np.array([5.0, 22.0, 30.0]) * (rim ** 2.0)
-        rgb = np.clip(base + diffuse_rgb + specular_rgb + cyan_rim, 0, 165)
+        # Commercial hard-surface material: no wireframe. One-sided diffuse
+        # lighting plus a tight specular response gives graphite/anodized
+        # surfaces real depth while preserving the exact canonical geometry.
+        key = max(0.0, float(np.dot(normal, key_light)))
+        fill_amt = max(0.0, float(np.dot(normal, fill_light)))
+        specular = max(0.0, float(np.dot(normal, half_vec))) ** 28
+
+        base = np.array([10.0, 13.0, 18.0])
+        diffuse_rgb = np.array([65.0, 69.0, 76.0]) * (
+            0.10 + key * 0.58 + fill_amt * 0.12
+        )
+        specular_rgb = np.array([130.0, 140.0, 155.0]) * specular
+        rgb = np.clip(base + diffuse_rgb + specular_rgb, 0, 165)
+
         draw.polygon(
             points,
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
         )
         object_mask_draw.polygon(points, fill=255)
 
-    # Product render: no cyan wireframe. Keep only restrained silhouette/crease
-    # accents in a neutral tone so the geometry reads as a manufactured object.
-    try:
-        adjacency_edges = np.asarray(mesh.face_adjacency_edges, dtype=int)
-        adjacency_angles = np.asarray(mesh.face_adjacency_angles, dtype=float)
-        adjacency = np.asarray(mesh.face_adjacency, dtype=int)
-        face_normals = np.asarray(normals, dtype=float)
+    # A manufactured-object silhouette, not a CAD outline. This is generated
+    # from the final product mask and therefore does not expose triangulation.
+    dilated = object_mask.filter(ImageFilter.MaxFilter(9))
+    eroded = object_mask.filter(ImageFilter.MinFilter(7))
+    outer = ImageChops.subtract(dilated, object_mask)
+    inner = ImageChops.subtract(object_mask, eroded)
 
-        # Sharp manufactured creases only.
-        sharp_mask = adjacency_angles >= np.deg2rad(42.0)
-        sharp_edges = adjacency_edges[sharp_mask]
+    outer_layer = Image.new("RGBA", render_size, (2, 7, 12, 0))
+    outer_layer.putalpha(outer.point(lambda value: int(value * 0.55)))
+    image = Image.alpha_composite(image, outer_layer)
 
-        # Silhouette edges: adjacent faces on opposite sides of the view plane.
-        view_facing = face_normals[:, 2]
-        sil_mask = (view_facing[adjacency[:, 0]] * view_facing[adjacency[:, 1]]) < 0
-        silhouette_edges = adjacency_edges[sil_mask]
-
-        if len(sharp_edges) > 1800:
-            sharp_edges = sharp_edges[np.linspace(0, len(sharp_edges) - 1, 1800, dtype=int)]
-        if len(silhouette_edges) > 1800:
-            silhouette_edges = silhouette_edges[np.linspace(0, len(silhouette_edges) - 1, 1800, dtype=int)]
-
-        for a, b in sharp_edges:
-            pa = tuple(map(float, projected[a]))
-            pb = tuple(map(float, projected[b]))
-            draw.line((pa, pb), fill=(8, 16, 24, 46), width=max(1, SUPERSAMPLE))
-
-        for a, b in silhouette_edges:
-            pa = tuple(map(float, projected[a]))
-            pb = tuple(map(float, projected[b]))
-            draw.line((pa, pb), fill=(3, 8, 14, 95), width=max(1, SUPERSAMPLE * 2))
-    except Exception:
-        pass
+    inner_layer = Image.new("RGBA", render_size, (190, 225, 250, 0))
+    inner_layer.putalpha(inner.point(lambda value: int(value * 0.10)))
+    image = Image.alpha_composite(image, inner_layer)
 
     # Add a restrained photographic bloom around the product silhouette.
     # It creates separation from the blueprint background without turning the
@@ -299,7 +251,7 @@ def render_product_thumbnail(slug: str) -> bytes:
     glow = Image.new("RGBA", render_size, (78, 174, 236, 0))
     glow_alpha = object_mask.filter(
         ImageFilter.GaussianBlur(18 * SUPERSAMPLE)
-    ).point(lambda v: int(v * 0.055))
+    ).point(lambda v: int(v * 0.04))
     glow.putalpha(glow_alpha)
     image = Image.alpha_composite(glow, image)
 
