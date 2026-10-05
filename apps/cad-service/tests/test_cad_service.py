@@ -9,6 +9,9 @@ from app import (
     PlateRequest,
     build_plate,
     build_plate_design,
+    build_product_design,
+    ProductDesignRequest,
+    CAD_PRODUCT_PROFILES,
     health,
 )
 
@@ -220,3 +223,61 @@ def test_cad_channel_removes_material_and_rib_adds_material():
     assert rib.val().isValid()
     assert channel.val().Volume() < base.val().Volume()
     assert rib.val().Volume() > base.val().Volume()
+
+
+
+def test_cad_product_profiles_are_canonical_and_generate_valid_brep():
+    assert {
+        "vesa-adapter",
+        "camera-plate",
+        "qr-plate",
+        "universal-mount-plate",
+        "vesa-offset-adapter",
+        "perforated-mount-plate",
+        "drill-template",
+    }.issubset(CAD_PRODUCT_PROFILES)
+
+    for slug in CAD_PRODUCT_PROFILES:
+        result = build_product_design(slug, ProductDesignRequest())
+        solid = result.val()
+        assert solid.isValid(), slug
+        assert solid.Volume() > 0, slug
+
+
+def test_cad_product_adapter_uses_canonical_parameter_overrides():
+    base = build_product_design("vesa-adapter", ProductDesignRequest())
+    wider = build_product_design(
+        "vesa-adapter",
+        ProductDesignRequest(params={"width": 160, "height": 140}),
+    )
+    assert wider.val().Volume() > base.val().Volume()
+
+
+def test_cad_product_adapter_accepts_shared_operation_stack():
+    result = build_product_design(
+        "universal-mount-plate",
+        ProductDesignRequest(
+            operations=[
+                CadOperation(type="hole", x=-20, y=0, diameter_mm=5),
+                CadOperation(type="slot", x=20, y=0, length_mm=24, width_mm=6),
+                CadOperation(
+                    type="vent_hex",
+                    x=0,
+                    y=20,
+                    rows=2,
+                    cols=3,
+                    radius_mm=3,
+                    gap_mm=2,
+                ),
+            ],
+        ),
+    )
+    assert result.val().isValid()
+    assert result.val().Volume() > 0
+
+
+def test_cad_product_adapter_fails_closed_for_unknown_product():
+    import pytest
+
+    with pytest.raises(ValueError, match="not enabled"):
+        build_product_design("router-mount", ProductDesignRequest())
