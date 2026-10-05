@@ -16,7 +16,7 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
-CACHE_VERSION = "studio-v4"
+CACHE_VERSION = "studio-v5"
 CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
 
 
@@ -122,16 +122,16 @@ def _background(size: tuple[int, int]) -> Image.Image:
     image = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB")
     draw = ImageDraw.Draw(image, "RGBA")
 
-    grid = 72 * SUPERSAMPLE
+    # Commercial cards should not read as a CAD viewport. Keep only a
+    # barely-visible blueprint rhythm and a soft studio horizon.
+    grid = 96 * SUPERSAMPLE
     for x in range(0, w, grid):
-        draw.line((x, 0, x, h), fill=(30, 111, 180, 14), width=1)
+        draw.line((x, 0, x, h), fill=(40, 112, 170, 6), width=1)
     for y in range(0, h, grid):
-        draw.line((0, y, w, y), fill=(30, 111, 180, 14), width=1)
+        draw.line((0, y, w, y), fill=(40, 112, 170, 6), width=1)
 
-    # Faint horizon gives the object a studio-table feeling without faking
-    # geometry or adding product-specific decoration.
-    horizon = int(h * 0.71)
-    draw.line((0, horizon, w, horizon), fill=(255, 255, 255, 70), width=2)
+    horizon = int(h * 0.72)
+    draw.line((0, horizon, w, horizon), fill=(255, 255, 255, 92), width=2)
     return image
 
 
@@ -204,9 +204,9 @@ def render_product_thumbnail(slug: str) -> bytes:
             width / 2 + object_w * 0.38,
             height * 0.77,
         ),
-        fill=(18, 46, 76, 92),
+        fill=(15, 30, 48, 118),
     )
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(26 * SUPERSAMPLE))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(34 * SUPERSAMPLE))
     image = Image.alpha_composite(image.convert("RGBA"), shadow_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
@@ -246,36 +246,50 @@ def render_product_thumbnail(slug: str) -> bytes:
         # Product-style dark anodized material. Keep the body genuinely dark
         # and let controlled diffuse/specular light reveal form, matching the
         # established Studio Render cards instead of a CAD viewport.
-        diffuse = float(np.clip(0.10 + key * 0.48 + fill_amt * 0.10, 0.08, 0.72))
-        specular = abs(float(np.dot(normal, half_vec))) ** 16
-        base = np.array([7.0, 12.0, 18.0])
-        diffuse_rgb = np.array([66.0, 78.0, 92.0]) * diffuse
-        specular_rgb = np.array([118.0, 142.0, 166.0]) * specular
-        cyan_rim = np.array([8.0, 34.0, 48.0]) * (rim ** 1.7)
-        rgb = np.clip(base + diffuse_rgb + specular_rgb + cyan_rim, 0, 185)
+        diffuse = float(np.clip(0.08 + key * 0.38 + fill_amt * 0.08, 0.05, 0.58))
+        specular = abs(float(np.dot(normal, half_vec))) ** 24
+        base = np.array([5.0, 8.0, 12.0])
+        diffuse_rgb = np.array([46.0, 54.0, 64.0]) * diffuse
+        specular_rgb = np.array([138.0, 152.0, 168.0]) * specular
+        cyan_rim = np.array([5.0, 22.0, 30.0]) * (rim ** 2.0)
+        rgb = np.clip(base + diffuse_rgb + specular_rgb + cyan_rim, 0, 165)
         draw.polygon(
             points,
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
         )
         object_mask_draw.polygon(points, fill=255)
 
-    # Draw only real feature creases. Rendering every triangulation edge made
-    # flat surfaces look like wireframe/low-poly meshes. Adjacency angles let
-    # us keep meaningful product edges while hiding internal tessellation.
+    # Product render: no cyan wireframe. Keep only restrained silhouette/crease
+    # accents in a neutral tone so the geometry reads as a manufactured object.
     try:
         adjacency_edges = np.asarray(mesh.face_adjacency_edges, dtype=int)
         adjacency_angles = np.asarray(mesh.face_adjacency_angles, dtype=float)
-        sharp = adjacency_edges[adjacency_angles >= np.deg2rad(24.0)]
-        if len(sharp) > 2400:
-            sharp = sharp[np.linspace(0, len(sharp) - 1, 2400, dtype=int)]
-        for a, b in sharp:
+        adjacency = np.asarray(mesh.face_adjacency, dtype=int)
+        face_normals = np.asarray(normals, dtype=float)
+
+        # Sharp manufactured creases only.
+        sharp_mask = adjacency_angles >= np.deg2rad(42.0)
+        sharp_edges = adjacency_edges[sharp_mask]
+
+        # Silhouette edges: adjacent faces on opposite sides of the view plane.
+        view_facing = face_normals[:, 2]
+        sil_mask = (view_facing[adjacency[:, 0]] * view_facing[adjacency[:, 1]]) < 0
+        silhouette_edges = adjacency_edges[sil_mask]
+
+        if len(sharp_edges) > 1800:
+            sharp_edges = sharp_edges[np.linspace(0, len(sharp_edges) - 1, 1800, dtype=int)]
+        if len(silhouette_edges) > 1800:
+            silhouette_edges = silhouette_edges[np.linspace(0, len(silhouette_edges) - 1, 1800, dtype=int)]
+
+        for a, b in sharp_edges:
             pa = tuple(map(float, projected[a]))
             pb = tuple(map(float, projected[b]))
-            draw.line(
-                (pa, pb),
-                fill=(224, 242, 255, 38),
-                width=max(1, SUPERSAMPLE),
-            )
+            draw.line((pa, pb), fill=(8, 16, 24, 46), width=max(1, SUPERSAMPLE))
+
+        for a, b in silhouette_edges:
+            pa = tuple(map(float, projected[a]))
+            pb = tuple(map(float, projected[b]))
+            draw.line((pa, pb), fill=(3, 8, 14, 95), width=max(1, SUPERSAMPLE * 2))
     except Exception:
         pass
 
@@ -285,7 +299,7 @@ def render_product_thumbnail(slug: str) -> bytes:
     glow = Image.new("RGBA", render_size, (78, 174, 236, 0))
     glow_alpha = object_mask.filter(
         ImageFilter.GaussianBlur(18 * SUPERSAMPLE)
-    ).point(lambda v: int(v * 0.10))
+    ).point(lambda v: int(v * 0.055))
     glow.putalpha(glow_alpha)
     image = Image.alpha_composite(glow, image)
 
