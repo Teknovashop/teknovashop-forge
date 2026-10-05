@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from io import BytesIO
 from math import cos, radians, sin
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -15,6 +16,39 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
+CACHE_VERSION = "studio-v2"
+CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
+
+
+def _cache_path(slug: str) -> Path:
+    return CACHE_DIR / f"{slug}.png"
+
+
+def _read_disk_cache(slug: str) -> bytes | None:
+    path = _cache_path(slug)
+    try:
+        if not path.is_file():
+            return None
+        data = path.read_bytes()
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 5000:
+            return data
+    except OSError:
+        return None
+    return None
+
+
+def _write_disk_cache(slug: str, data: bytes) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(slug)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except OSError:
+        # Runtime caching is an optimization. Rendering must still work on
+        # read-only filesystems.
+        pass
+
 
 
 def _rotation_matrix() -> np.ndarray:
@@ -48,43 +82,56 @@ def _as_mesh(value) -> trimesh.Trimesh:
 
 
 def _background(size: tuple[int, int]) -> Image.Image:
-    """Premium neutral technical backdrop.
+    """Bright studio backdrop aligned with Teknovashop's professional renders.
 
-    Rendered with numpy instead of per-pixel Python loops so we can afford
-    supersampling without making catalogue responses slow.
+    The generated geometry must feel like the same product family as the
+    hand-authored Studio Render cards: icy blue light, restrained technical
+    grid and enough contrast for dark product geometry.
     """
     w, h = size
     yy, xx = np.mgrid[0:h, 0:w]
     ny = yy / max(1, h - 1)
     nx = xx / max(1, w - 1)
 
-    top = np.array([8.0, 20.0, 34.0])
-    bottom = np.array([12.0, 31.0, 49.0])
+    top = np.array([236.0, 247.0, 255.0])
+    bottom = np.array([183.0, 218.0, 246.0])
     rgb = top[None, None, :] * (1.0 - ny[..., None]) + bottom[None, None, :] * ny[..., None]
 
-    # Soft cyan studio glow behind the model, plus a restrained vignette.
-    glow = np.exp(
+    # Broad white key light from upper-left and cool blue bloom behind object.
+    key_glow = np.exp(
         -(
-            ((nx - 0.62) / 0.34) ** 2
-            + ((ny - 0.30) / 0.30) ** 2
+            ((nx - 0.26) / 0.34) ** 2
+            + ((ny - 0.18) / 0.30) ** 2
         )
     )
-    rgb += glow[..., None] * np.array([9.0, 22.0, 31.0])
+    blue_glow = np.exp(
+        -(
+            ((nx - 0.72) / 0.38) ** 2
+            + ((ny - 0.38) / 0.40) ** 2
+        )
+    )
+    rgb += key_glow[..., None] * np.array([18.0, 18.0, 18.0])
+    rgb += blue_glow[..., None] * np.array([-8.0, 6.0, 18.0])
 
-    dx = (nx - 0.5) / 0.72
-    dy = (ny - 0.48) / 0.76
-    vignette = np.clip((dx * dx + dy * dy) * 0.22, 0.0, 0.22)
+    # Keep the edges slightly cooler/darker so cards remain visually framed.
+    dx = (nx - 0.5) / 0.78
+    dy = (ny - 0.47) / 0.82
+    vignette = np.clip((dx * dx + dy * dy) * 0.12, 0.0, 0.12)
     rgb *= (1.0 - vignette[..., None])
 
     image = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB")
     draw = ImageDraw.Draw(image, "RGBA")
 
-    # Fine engineering grid kept deliberately subtle.
-    grid = 64 * SUPERSAMPLE
+    grid = 72 * SUPERSAMPLE
     for x in range(0, w, grid):
-        draw.line((x, 0, x, h), fill=(116, 196, 255, 9), width=1)
+        draw.line((x, 0, x, h), fill=(30, 111, 180, 14), width=1)
     for y in range(0, h, grid):
-        draw.line((0, y, w, y), fill=(116, 196, 255, 9), width=1)
+        draw.line((0, y, w, y), fill=(30, 111, 180, 14), width=1)
+
+    # Faint horizon gives the object a studio-table feeling without faking
+    # geometry or adding product-specific decoration.
+    horizon = int(h * 0.71)
+    draw.line((0, horizon, w, horizon), fill=(255, 255, 255, 70), width=2)
     return image
 
 
@@ -112,8 +159,11 @@ def _face_indices(mesh: trimesh.Trimesh, maximum: int = 5200) -> Iterable[int]:
     return np.linspace(0, count - 1, maximum, dtype=int)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=128)
 def render_product_thumbnail(slug: str) -> bytes:
+    cached = _read_disk_cache(slug)
+    if cached is not None:
+        return cached
     contract = PRODUCTS.get(slug)
     if not contract:
         raise KeyError(slug)
@@ -146,9 +196,9 @@ def render_product_thumbnail(slug: str) -> bytes:
             width / 2 + object_w * 0.38,
             height * 0.77,
         ),
-        fill=(0, 0, 0, 85),
+        fill=(18, 46, 76, 92),
     )
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(24 * SUPERSAMPLE))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(26 * SUPERSAMPLE))
     image = Image.alpha_composite(image.convert("RGBA"), shadow_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
@@ -174,12 +224,14 @@ def render_product_thumbnail(slug: str) -> bytes:
         fill_amt = max(0.0, float(np.dot(normal, fill_light)))
         rim = max(0.0, float(np.dot(normal, rim_light)))
 
-        # Cool matte polymer / anodized-metal language shared by every piece.
-        intensity = float(np.clip(0.32 + key * 0.50 + fill_amt * 0.14, 0.22, 0.98))
-        base = np.array([132.0, 154.0, 178.0])
-        highlight = np.array([82.0, 91.0, 96.0]) * intensity
-        cyan_rim = np.array([8.0, 23.0, 30.0]) * rim
-        rgb = np.clip(base + highlight + cyan_rim, 0, 245)
+        # Dark anodized-metal / technical polymer language matching the
+        # professional product cards. The brighter background provides the
+        # separation, while specular-like lighting keeps geometry readable.
+        intensity = float(np.clip(0.28 + key * 0.56 + fill_amt * 0.16, 0.18, 1.0))
+        base = np.array([15.0, 24.0, 34.0])
+        highlight = np.array([82.0, 102.0, 122.0]) * intensity
+        cyan_rim = np.array([12.0, 44.0, 58.0]) * rim
+        rgb = np.clip(base + highlight + cyan_rim, 0, 190)
         draw.polygon(
             points,
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
@@ -196,7 +248,7 @@ def render_product_thumbnail(slug: str) -> bytes:
             pb = tuple(map(float, projected[b]))
             draw.line(
                 (pa, pb),
-                fill=(155, 235, 255, 38),
+                fill=(188, 239, 255, 58),
                 width=max(1, SUPERSAMPLE),
             )
     except Exception:
@@ -211,4 +263,6 @@ def render_product_thumbnail(slug: str) -> bytes:
 
     out = BytesIO()
     image.save(out, format="PNG", optimize=True)
-    return out.getvalue()
+    data = out.getvalue()
+    _write_disk_cache(slug, data)
+    return data

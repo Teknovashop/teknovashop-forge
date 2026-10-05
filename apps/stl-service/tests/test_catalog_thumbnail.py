@@ -5,6 +5,7 @@ from io import BytesIO
 import pytest
 
 from catalog_thumbnail import CANVAS, render_product_thumbnail
+from model_contracts import PRODUCTS
 
 
 @pytest.mark.parametrize(
@@ -28,3 +29,28 @@ def test_thumbnail_render_is_deterministic_and_cached():
     first = render_product_thumbnail("vesa-adapter")
     second = render_product_thumbnail("vesa-adapter")
     assert first == second
+
+
+def test_generated_thumbnail_uses_bright_studio_language():
+    data = render_product_thumbnail("vertical-laptop-dock")
+    image = Image.open(BytesIO(data)).convert("RGB")
+
+    # Studio background should stay bright/cool, while the product itself
+    # contributes clearly darker pixels. Broad thresholds avoid overfitting.
+    corner = image.crop((0, 0, 160, 120))
+    corner_mean = sum(ImageStat.Stat(corner).mean) / 3
+    extrema = image.getextrema()
+    darkest = min(channel[0] for channel in extrema)
+
+    assert corner_mean > 150
+    assert darkest < 90
+
+
+@pytest.mark.parametrize("slug", sorted(PRODUCTS))
+def test_every_canonical_product_has_renderable_catalog_thumbnail(slug):
+    data = render_product_thumbnail(slug)
+    assert data.startswith(b"\x89PNG\r\n\x1a\n"), slug
+    image = Image.open(BytesIO(data))
+    assert image.size == CANVAS, slug
+    assert image.mode == "RGB", slug
+    assert len(data) > 5000, slug
