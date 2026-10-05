@@ -16,7 +16,7 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
-CACHE_VERSION = "studio-v3"
+CACHE_VERSION = "studio-v4"
 CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
 
 
@@ -210,12 +210,15 @@ def render_product_thumbnail(slug: str) -> bytes:
     image = Image.alpha_composite(image.convert("RGBA"), shadow_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
-    key_light = np.array([-0.38, -0.52, 0.76], dtype=float)
+    key_light = np.array([-0.42, -0.58, 0.70], dtype=float)
     key_light /= np.linalg.norm(key_light)
-    fill_light = np.array([0.68, 0.10, 0.38], dtype=float)
+    fill_light = np.array([0.74, 0.18, 0.30], dtype=float)
     fill_light /= np.linalg.norm(fill_light)
-    rim_light = np.array([0.10, 0.72, 0.68], dtype=float)
+    rim_light = np.array([0.06, 0.74, 0.67], dtype=float)
     rim_light /= np.linalg.norm(rim_light)
+    view_dir = np.array([0.0, 0.0, 1.0], dtype=float)
+    half_vec = key_light + view_dir
+    half_vec /= np.linalg.norm(half_vec)
 
     faces = np.asarray(mesh.faces, dtype=int)
     normals = np.asarray(mesh.face_normals, dtype=float) @ _rotation_matrix().T
@@ -238,11 +241,16 @@ def render_product_thumbnail(slug: str) -> bytes:
         # Dark anodized-metal / technical polymer language matching the
         # professional product cards. The brighter background provides the
         # separation, while specular-like lighting keeps geometry readable.
-        intensity = float(np.clip(0.28 + key * 0.56 + fill_amt * 0.16, 0.18, 1.0))
-        base = np.array([15.0, 24.0, 34.0])
-        highlight = np.array([82.0, 102.0, 122.0]) * intensity
-        cyan_rim = np.array([12.0, 44.0, 58.0]) * rim
-        rgb = np.clip(base + highlight + cyan_rim, 0, 190)
+        # Product-style dark anodized material. Keep the body genuinely dark
+        # and let controlled diffuse/specular light reveal form, matching the
+        # established Studio Render cards instead of a CAD viewport.
+        diffuse = float(np.clip(0.10 + key * 0.48 + fill_amt * 0.10, 0.08, 0.72))
+        specular = abs(float(np.dot(normal, half_vec))) ** 16
+        base = np.array([7.0, 12.0, 18.0])
+        diffuse_rgb = np.array([66.0, 78.0, 92.0]) * diffuse
+        specular_rgb = np.array([118.0, 142.0, 166.0]) * specular
+        cyan_rim = np.array([8.0, 34.0, 48.0]) * (rim ** 1.7)
+        rgb = np.clip(base + diffuse_rgb + specular_rgb + cyan_rim, 0, 185)
         draw.polygon(
             points,
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
@@ -262,14 +270,21 @@ def render_product_thumbnail(slug: str) -> bytes:
             pb = tuple(map(float, projected[b]))
             draw.line(
                 (pa, pb),
-                fill=(202, 242, 255, 74),
+                fill=(224, 242, 255, 38),
                 width=max(1, SUPERSAMPLE),
             )
     except Exception:
         pass
 
-    # Downsample once at the end. This removes jagged triangle edges and gives
-    # the generated catalogue pieces a consistent studio-render finish.
+    # Add a restrained photographic bloom around the product silhouette.
+    # It creates separation from the blueprint background without turning the
+    # technical geometry into a neon/wireframe illustration.
+    alpha = image.getchannel("A")
+    glow = Image.new("RGBA", render_size, (78, 174, 236, 0))
+    glow.putalpha(alpha.filter(ImageFilter.GaussianBlur(18 * SUPERSAMPLE)).point(lambda v: int(v * 0.10)))
+    image = Image.alpha_composite(glow, image)
+
+    # Downsample once at the end for clean commercial antialiasing.
     image = image.convert("RGB").resize(
         CANVAS,
         Image.Resampling.LANCZOS,
