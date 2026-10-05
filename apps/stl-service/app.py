@@ -643,6 +643,56 @@ def catalogue_thumbnail(slug: str):
     )
 
 
+@app.get("/catalog/mesh/{slug}.stl")
+def catalogue_mesh(slug: str):
+    """Public, canonical STL preview used only by catalogue/WebGL cards.
+
+    This endpoint is intentionally limited to PRODUCTS and always builds the
+    contract defaults. It does not expose purchased/customized customer files.
+    """
+    storage_slug = _slug_for_storage(_norm_slug_for_builder(slug))
+    contract = PRODUCTS.get(storage_slug)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    builder = REGISTRY.get(contract["builder"])
+    if builder is None:
+        raise HTTPException(status_code=500, detail="Canonical builder missing")
+
+    try:
+        value = builder(dict(contract["default"]))
+        if isinstance(value, trimesh.Trimesh):
+            mesh = value
+        elif isinstance(value, trimesh.Scene):
+            mesh = trimesh.util.concatenate(tuple(value.geometry.values()))
+        elif isinstance(value, (list, tuple)):
+            meshes = [item for item in value if isinstance(item, trimesh.Trimesh)]
+            if not meshes:
+                raise TypeError("Builder returned no mesh")
+            mesh = trimesh.util.concatenate(meshes)
+        else:
+            raise TypeError(f"Unsupported builder output: {type(value).__name__}")
+
+        payload = mesh.export(file_type="stl")
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        payload = bytes(payload)
+        if len(payload) <= 84:
+            raise ValueError("Generated STL is empty")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Catalogue mesh failed: {exc}")
+
+    return Response(
+        content=payload,
+        media_type="model/stl",
+        headers={
+            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'inline; filename="{storage_slug}.stl"',
+        },
+    )
+
+
 @app.get("/health")
 def health():
     return {
