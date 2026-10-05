@@ -298,14 +298,15 @@ def test_cad_enclosure_family_builds_valid_body_and_lid():
 
 
 def test_cad_enclosure_body_is_hollow_and_lid_accepts_operations():
+    same_params = {"length": 150, "width": 95, "height": 50, "wall": 3}
     plain_body, plain_lid = build_enclosure_product(
         "electronics-box",
-        ProductDesignRequest(),
+        ProductDesignRequest(params=same_params),
     )
     body, vented_lid = build_enclosure_product(
         "electronics-box",
         ProductDesignRequest(
-            params={"length": 150, "width": 95, "height": 50, "wall": 3},
+            params=same_params,
             operations=[
                 CadOperation(
                     type="vent_linear",
@@ -332,6 +333,7 @@ def test_cad_enclosure_body_is_hollow_and_lid_accepts_operations():
 
     # A hollow body must contain substantially less material than its outer box.
     outer_volume = 150 * 95 * 50
+    assert plain_body.val().Volume() == body.val().Volume()
     assert body.val().Volume() < outer_volume * 0.5
     assert body.val().Volume() > 0
 
