@@ -16,7 +16,7 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
-CACHE_VERSION = "studio-v2"
+CACHE_VERSION = "studio-v3"
 CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
 
 
@@ -172,9 +172,17 @@ def render_product_thumbnail(slug: str) -> bytes:
     if builder is None:
         raise KeyError(contract["builder"])
 
-    mesh = _as_mesh(builder(dict(contract["default"])))
+    mesh = _as_mesh(builder(dict(contract["default"]))).copy()
     if not len(mesh.vertices) or not len(mesh.faces):
         raise ValueError("Empty catalogue mesh")
+
+    # Normalize winding/normals before shading. Several legacy builders return
+    # triangulated planar faces with inconsistent triangle orientation; without
+    # this, a single flat panel can look like a faceted low-poly object.
+    try:
+        mesh.fix_normals(multibody=True)
+    except TypeError:
+        mesh.fix_normals()
 
     output_width, output_height = CANVAS
     width = output_width * SUPERSAMPLE
@@ -220,9 +228,12 @@ def render_product_thumbnail(slug: str) -> bytes:
         face = faces[face_index]
         points = [tuple(map(float, projected[v])) for v in face]
         normal = normals[face_index]
-        key = max(0.0, float(np.dot(normal, key_light)))
-        fill_amt = max(0.0, float(np.dot(normal, fill_light)))
-        rim = max(0.0, float(np.dot(normal, rim_light)))
+        # Use two-sided diffuse terms. The catalogue renderer is a product
+        # presentation layer, not a diagnostic normal viewer; opposite winding
+        # on coplanar triangles must not create visible triangular patches.
+        key = abs(float(np.dot(normal, key_light)))
+        fill_amt = abs(float(np.dot(normal, fill_light)))
+        rim = abs(float(np.dot(normal, rim_light)))
 
         # Dark anodized-metal / technical polymer language matching the
         # professional product cards. The brighter background provides the
@@ -237,18 +248,21 @@ def render_product_thumbnail(slug: str) -> bytes:
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
         )
 
-    # Exact mesh silhouette/feature edges, in the same cyan language as Forge.
+    # Draw only real feature creases. Rendering every triangulation edge made
+    # flat surfaces look like wireframe/low-poly meshes. Adjacency angles let
+    # us keep meaningful product edges while hiding internal tessellation.
     try:
-        edge_mesh = mesh.copy()
-        edges = np.asarray(edge_mesh.edges_unique, dtype=int)
-        if len(edges) > 5000:
-            edges = edges[np.linspace(0, len(edges) - 1, 5000, dtype=int)]
-        for a, b in edges:
+        adjacency_edges = np.asarray(mesh.face_adjacency_edges, dtype=int)
+        adjacency_angles = np.asarray(mesh.face_adjacency_angles, dtype=float)
+        sharp = adjacency_edges[adjacency_angles >= np.deg2rad(24.0)]
+        if len(sharp) > 2400:
+            sharp = sharp[np.linspace(0, len(sharp) - 1, 2400, dtype=int)]
+        for a, b in sharp:
             pa = tuple(map(float, projected[a]))
             pb = tuple(map(float, projected[b]))
             draw.line(
                 (pa, pb),
-                fill=(188, 239, 255, 58),
+                fill=(202, 242, 255, 74),
                 width=max(1, SUPERSAMPLE),
             )
     except Exception:
