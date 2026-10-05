@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import io
+import sys
 import tempfile
 from pathlib import Path
 
 import cadquery as cq
+
+STL_SERVICE_DIR = Path(__file__).resolve().parents[1] / "stl-service"
+if str(STL_SERVICE_DIR) not in sys.path:
+    sys.path.insert(0, str(STL_SERVICE_DIR))
+
+from model_contracts import PRODUCTS
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -26,6 +34,46 @@ SUPPORTED_OPERATIONS = (
     "rib",
     "boss",
 )
+
+CAD_PRODUCT_PROFILES = {
+    "vesa-adapter": {
+        "width": "width",
+        "height": "height",
+        "thickness": "thickness",
+    },
+    "camera-plate": {
+        "width": "width",
+        "height": "depth",
+        "thickness": "thickness",
+        "chamfer": "chamfer",
+    },
+    "qr-plate": {
+        "width": "length",
+        "height": "width",
+        "thickness": "thickness",
+    },
+    "universal-mount-plate": {
+        "width": "width",
+        "height": "height",
+        "thickness": "thickness",
+    },
+    "vesa-offset-adapter": {
+        "width": "width",
+        "height": "height",
+        "thickness": "thickness",
+    },
+    "perforated-mount-plate": {
+        "width": "width",
+        "height": "height",
+        "thickness": "thickness",
+    },
+    "drill-template": {
+        "width": "length",
+        "height": "width",
+        "thickness": "thickness",
+    },
+}
+
 
 
 class PlateRequest(BaseModel):
@@ -289,6 +337,46 @@ def build_plate_design(body: PlateDesignRequest):
 
 
 
+class ProductDesignRequest(BaseModel):
+    params: dict[str, float] = Field(default_factory=dict)
+    operations: list[CadOperation] = Field(default_factory=list, max_length=24)
+
+
+def _canonical_product_params(slug: str, overrides: dict[str, float]) -> dict[str, float]:
+    contract = PRODUCTS.get(slug)
+    if not contract:
+        raise ValueError("unknown canonical product")
+    params = dict(contract.get("default") or {})
+    for key, value in overrides.items():
+        if key in params:
+            params[key] = float(value)
+    return params
+
+
+def build_product_design(slug: str, body: ProductDesignRequest):
+    profile = CAD_PRODUCT_PROFILES.get(slug)
+    if not profile:
+        raise ValueError("product is not enabled for CAD V2 family adapter")
+
+    params = _canonical_product_params(slug, body.params)
+    width = float(params[profile["width"]])
+    height = float(params[profile["height"]])
+    thickness = float(params[profile["thickness"]])
+    chamfer = float(params.get(profile.get("chamfer", ""), 1.0))
+    corner_radius = min(6.0, max(0.0, min(width, height) * 0.04))
+
+    base = build_plate(
+        PlateRequest(
+            width=width,
+            height=height,
+            thickness=thickness,
+            corner_radius=corner_radius,
+            chamfer=chamfer,
+        )
+    )
+    return apply_plate_operations(base, body.operations)
+
+
 @app.get("/health")
 def health():
     return {
@@ -297,6 +385,7 @@ def health():
         "engine": "cadquery",
         "cadquery_version": cq.__version__,
         "operations": list(SUPPORTED_OPERATIONS),
+        "product_profiles": sorted(CAD_PRODUCT_PROFILES),
     }
 
 
@@ -350,3 +439,29 @@ def plate_design_step(body: PlateDesignRequest):
         return Response(data, media_type="application/step")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"CAD operation failed: {exc}") from exc
+
+
+@app.post("/v2/product/{slug}/design/stl")
+def product_design_stl(slug: str, body: ProductDesignRequest):
+    try:
+        part = build_product_design(slug, body)
+        with tempfile.NamedTemporaryFile(suffix=".stl") as tmp:
+            cq.exporters.export(part, tmp.name, exportType="STL")
+            tmp.seek(0)
+            data = tmp.read()
+        return Response(data, media_type="model/stl")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAD product generation failed: {exc}") from exc
+
+
+@app.post("/v2/product/{slug}/design/step")
+def product_design_step(slug: str, body: ProductDesignRequest):
+    try:
+        part = build_product_design(slug, body)
+        with tempfile.NamedTemporaryFile(suffix=".step") as tmp:
+            cq.exporters.export(part, tmp.name, exportType="STEP")
+            tmp.seek(0)
+            data = tmp.read()
+        return Response(data, media_type="application/step")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAD product generation failed: {exc}") from exc
