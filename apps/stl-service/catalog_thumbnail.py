@@ -16,7 +16,7 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
-CACHE_VERSION = "studio-v6"
+CACHE_VERSION = "studio-v7"
 CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
 
 
@@ -203,7 +203,17 @@ def render_product_thumbnail(slug: str) -> bytes:
     depths = rotated[faces].mean(axis=1)[:, 2]
 
     selected = np.asarray(list(_face_indices(mesh)), dtype=int)
-    order = selected[np.argsort(depths[selected])]
+
+    # Orthographic camera looks from +Z towards the origin after model
+    # rotation. Faces whose camera-space normal points away from +Z are back
+    # faces and must never be painted. The old renderer drew both sides of
+    # every triangle, which let hidden triangles overwrite visible surfaces and
+    # produced the large dark diagonal artifacts seen on flat plates.
+    front_facing = normals[:, 2] > 1e-7
+    visible = selected[front_facing[selected]]
+
+    # Painter order: far (+ smaller camera-space Z) first, near last.
+    order = visible[np.argsort(depths[visible])]
 
     for face_index in order:
         face = faces[face_index]
