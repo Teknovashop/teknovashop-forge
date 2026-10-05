@@ -210,6 +210,8 @@ def render_product_thumbnail(slug: str) -> bytes:
     image = Image.alpha_composite(image.convert("RGBA"), shadow_layer)
 
     draw = ImageDraw.Draw(image, "RGBA")
+    object_mask = Image.new("L", render_size, 0)
+    object_mask_draw = ImageDraw.Draw(object_mask)
     key_light = np.array([-0.42, -0.58, 0.70], dtype=float)
     key_light /= np.linalg.norm(key_light)
     fill_light = np.array([0.74, 0.18, 0.30], dtype=float)
@@ -255,6 +257,7 @@ def render_product_thumbnail(slug: str) -> bytes:
             points,
             fill=(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255),
         )
+        object_mask_draw.polygon(points, fill=255)
 
     # Draw only real feature creases. Rendering every triangulation edge made
     # flat surfaces look like wireframe/low-poly meshes. Adjacency angles let
@@ -279,9 +282,11 @@ def render_product_thumbnail(slug: str) -> bytes:
     # Add a restrained photographic bloom around the product silhouette.
     # It creates separation from the blueprint background without turning the
     # technical geometry into a neon/wireframe illustration.
-    alpha = image.getchannel("A")
     glow = Image.new("RGBA", render_size, (78, 174, 236, 0))
-    glow.putalpha(alpha.filter(ImageFilter.GaussianBlur(18 * SUPERSAMPLE)).point(lambda v: int(v * 0.10)))
+    glow_alpha = object_mask.filter(
+        ImageFilter.GaussianBlur(18 * SUPERSAMPLE)
+    ).point(lambda v: int(v * 0.10))
+    glow.putalpha(glow_alpha)
     image = Image.alpha_composite(glow, image)
 
     # Downsample once at the end for clean commercial antialiasing.
