@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from io import BytesIO
 from math import cos, radians, sin
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -15,6 +16,39 @@ from models import REGISTRY
 
 CANVAS = (960, 720)
 SUPERSAMPLE = 2
+CACHE_VERSION = "studio-v2"
+CACHE_DIR = Path(__file__).resolve().parent / ".catalog-thumbnail-cache" / CACHE_VERSION
+
+
+def _cache_path(slug: str) -> Path:
+    return CACHE_DIR / f"{slug}.png"
+
+
+def _read_disk_cache(slug: str) -> bytes | None:
+    path = _cache_path(slug)
+    try:
+        if not path.is_file():
+            return None
+        data = path.read_bytes()
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 5000:
+            return data
+    except OSError:
+        return None
+    return None
+
+
+def _write_disk_cache(slug: str, data: bytes) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(slug)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except OSError:
+        # Runtime caching is an optimization. Rendering must still work on
+        # read-only filesystems.
+        pass
+
 
 
 def _rotation_matrix() -> np.ndarray:
@@ -125,8 +159,11 @@ def _face_indices(mesh: trimesh.Trimesh, maximum: int = 5200) -> Iterable[int]:
     return np.linspace(0, count - 1, maximum, dtype=int)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=128)
 def render_product_thumbnail(slug: str) -> bytes:
+    cached = _read_disk_cache(slug)
+    if cached is not None:
+        return cached
     contract = PRODUCTS.get(slug)
     if not contract:
         raise KeyError(slug)
@@ -226,4 +263,6 @@ def render_product_thumbnail(slug: str) -> bytes:
 
     out = BytesIO()
     image.save(out, format="PNG", optimize=True)
-    return out.getvalue()
+    data = out.getvalue()
+    _write_disk_cache(slug, data)
+    return data
