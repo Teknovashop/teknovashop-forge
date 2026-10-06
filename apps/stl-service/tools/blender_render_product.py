@@ -153,6 +153,12 @@ def main():
     bevel.limit_method = "ANGLE"
     bevel.angle_limit = math.radians(35)
 
+    try:
+        product.data.use_auto_smooth = True
+        product.data.auto_smooth_angle = math.radians(45)
+    except Exception:
+        pass
+
     weighted = product.modifiers.new("WeightedNormals", "WEIGHTED_NORMAL")
     weighted.keep_sharp = True
 
