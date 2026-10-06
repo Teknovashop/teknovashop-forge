@@ -39,7 +39,7 @@ jobs:
       - name: Install Blender
         run: |
           sudo apt-get update
-          sudo apt-get install -y blender
+          sudo apt-get install -y blender xvfb
 
       - name: Export Engineering STL set
         env:
@@ -56,7 +56,7 @@ jobs:
             slug="$(basename "$stl" .stl)"
             png="static/studio/engineering/$slug.png"
             webp="static/studio/engineering/$slug.webp"
-            blender -b --python tools/blender_render_product.py -- "$stl" "$png"
+            xvfb-run -a blender -b --python tools/blender_render_product.py -- "$stl" "$png"
             test -s "$png"
             python tools/convert_studio_webp.py "$png" "$webp"
             rm -f "$png"
