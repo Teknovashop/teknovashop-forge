@@ -758,28 +758,105 @@ def debug_storage(request: Request):
 
 
 @app.get("/catalog/products")
-def catalog_products():
-    """Catálogo canónico versionado usado por producto, QA y clientes."""
+def catalog_products(stage: Optional[str] = None, public_only: bool = False):
+    """Canonical product feed for storefront, Forge V2 and release QA.
+
+    Geometry/contracts and commercial metadata are joined here so clients do
+    not maintain a second independent product registry.
+    """
     try:
         from v2_operations import PRODUCT_CAPABILITIES
     except Exception:
         PRODUCT_CAPABILITIES = {}
 
-    return {
-        "count": len(PRODUCTS),
-        "products": [
+    try:
+        from product_catalog import PRODUCT_METADATA, PUBLIC_STAGES
+    except Exception:
+        PRODUCT_METADATA = {}
+        PUBLIC_STAGES = {"production"}
+
+    products = []
+    for slug, contract in PRODUCTS.items():
+        metadata = PRODUCT_METADATA.get(slug, {})
+        release_stage = str(contract.get("stage") or metadata.get("stage") or "engineering")
+        if public_only and release_stage not in PUBLIC_STAGES:
+            continue
+        if stage and release_stage != stage:
+            continue
+
+        products.append(
             {
                 "slug": slug,
-                "name": contract["name"],
+                "name": metadata.get("name") or contract["name"],
+                "family": metadata.get("family") or "Forge",
+                "description": metadata.get("description") or "",
+                "tips": metadata.get("tips") or [],
+                "marketing_image": metadata.get("marketing_image"),
+                "visual_source": metadata.get("visual_source") or "generated_preview",
                 "version": contract["version"],
-                "stage": contract["stage"],
+                "stage": release_stage,
+                "public": release_stage in PUBLIC_STAGES,
+                "builder": contract.get("builder"),
                 "capabilities": contract.get("capabilities", {}),
                 "v2_capabilities": sorted(PRODUCT_CAPABILITIES.get(slug, set())),
                 "defaults": contract["default"],
                 "variant": contract.get("variant", {}),
+                "min_extents": contract.get("min_extents"),
             }
-            for slug, contract in PRODUCTS.items()
-        ],
+        )
+
+    return {
+        "count": len(products),
+        "total": len(PRODUCTS),
+        "products": products,
+        "stages": {
+            "production": sum(1 for p in products if p["stage"] == "production"),
+            "visual_qa": sum(1 for p in products if p["stage"] == "visual_qa"),
+            "engineering": sum(1 for p in products if p["stage"] == "engineering"),
+        },
+    }
+
+
+@app.get("/catalog/products/{slug}")
+def catalog_product(slug: str):
+    storage_slug = _slug_for_storage(_norm_slug_for_builder(slug))
+    contract = PRODUCTS.get(storage_slug)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    try:
+        from v2_operations import PRODUCT_CAPABILITIES
+    except Exception:
+        PRODUCT_CAPABILITIES = {}
+
+    try:
+        from product_catalog import PRODUCT_METADATA, PUBLIC_STAGES
+    except Exception:
+        PRODUCT_METADATA = {}
+        PUBLIC_STAGES = {"production"}
+
+    metadata = PRODUCT_METADATA.get(storage_slug, {})
+    release_stage = str(
+        contract.get("stage") or metadata.get("stage") or "engineering"
+    )
+
+    return {
+        "slug": storage_slug,
+        "name": metadata.get("name") or contract["name"],
+        "family": metadata.get("family") or "Forge",
+        "description": metadata.get("description") or "",
+        "tips": metadata.get("tips") or [],
+        "marketing_image": metadata.get("marketing_image"),
+        "visual_source": metadata.get("visual_source") or "generated_preview",
+        "version": contract["version"],
+        "stage": release_stage,
+        "public": release_stage in PUBLIC_STAGES,
+        "builder": contract.get("builder"),
+        "capabilities": contract.get("capabilities", {}),
+        "v2_capabilities": sorted(PRODUCT_CAPABILITIES.get(storage_slug, set())),
+        "defaults": contract["default"],
+        "variant": contract.get("variant", {}),
+        "min_extents": contract.get("min_extents"),
     }
 
 

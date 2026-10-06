@@ -384,7 +384,7 @@ PRODUCTS = {
 }
 
 DEFAULT_PRODUCT_VERSION = "1.0.0-beta.1"
-DEFAULT_PRODUCT_STAGE = "engineering-beta"
+DEFAULT_PRODUCT_STAGE = "engineering"
 
 for _contract in PRODUCTS.values():
     _contract.setdefault("version", DEFAULT_PRODUCT_VERSION)
@@ -396,6 +396,20 @@ for _contract in PRODUCTS.values():
             "free_holes": False,
         },
     )
+
+# Release state is canonical commercial metadata, not a frontend concern.
+# The 18 curated Studio products are production; the remaining products stay
+# engineering until geometry + visual QA promotes them explicitly.
+try:
+    from product_catalog import PRODUCT_METADATA
+    for _slug, _metadata in PRODUCT_METADATA.items():
+        if _slug not in PRODUCTS:
+            continue
+        PRODUCTS[_slug]["stage"] = _metadata.get("stage", DEFAULT_PRODUCT_STAGE)
+        if PRODUCTS[_slug]["stage"] == "production":
+            PRODUCTS[_slug]["version"] = "1.0.0"
+except Exception:
+    PRODUCT_METADATA = {}
 
 # La perforación libre x/y es adicional a los agujeros nativos de estas placas.
 PRODUCTS["qr-plate"]["capabilities"]["free_holes"] = True

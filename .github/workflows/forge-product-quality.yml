@@ -51,7 +51,12 @@ jobs:
           pip install "pytest>=8,<9"
           pip check
 
-      - name: Run 18-product quality gate
+      - name: Run canonical product release gate
+        env:
+          PYTHONPATH: .
+        run: python product_release.py --all
+
+      - name: Run product quality test suite
         env:
           PYTHONPATH: .
         run: pytest -q tests
