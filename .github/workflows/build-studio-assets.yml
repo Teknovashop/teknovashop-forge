@@ -1,0 +1,142 @@
+name: Build Studio Assets
+
+on:
+  push:
+    branches:
+      - feat/blender-studio-assets
+    paths:
+      - "apps/stl-service/tools/export_studio_stls.py"
+      - "apps/stl-service/tools/blender_render_product.py"
+      - "apps/stl-service/tools/convert_studio_webp.py"
+      - ".github/workflows/build-studio-assets.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: studio-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      slugs: ${{ steps.products.outputs.slugs }}
+    defaults:
+      run:
+        working-directory: apps/stl-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - id: products
+        name: Build Engineering product matrix
+        env:
+          PYTHONPATH: .
+        run: |
+          python - <<'PY'
+          import json, os
+          from product_catalog import PRODUCT_METADATA
+          slugs = [slug for slug, meta in PRODUCT_METADATA.items() if meta.get("stage") == "engineering"]
+          assert len(slugs) == 54, f"Expected 54 engineering products, got {len(slugs)}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("slugs=" + json.dumps(slugs, separators=(",", ":")) + "\n")
+          print("\n".join(slugs))
+          PY
+
+  render:
+    needs: matrix
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        slug: ${{ fromJson(needs.matrix.outputs.slugs) }}
+    defaults:
+      run:
+        working-directory: apps/stl-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pillow
+
+      - name: Install Blender
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y blender xvfb
+
+      - name: Export canonical STL
+        env:
+          PYTHONPATH: .
+        run: |
+          rm -rf /tmp/teknovashop-studio
+          mkdir -p /tmp/teknovashop-studio
+          python tools/export_studio_stls.py             --output /tmp/teknovashop-studio             --slug "${{ matrix.slug }}"
+          test -s "/tmp/teknovashop-studio/${{ matrix.slug }}.stl"
+
+      - name: Render Studio asset
+        run: |
+          mkdir -p /tmp/studio-output
+          xvfb-run -a blender -b             --python tools/blender_render_product.py             -- "/tmp/teknovashop-studio/${{ matrix.slug }}.stl"                "/tmp/studio-output/${{ matrix.slug }}.png"
+          test -s "/tmp/studio-output/${{ matrix.slug }}.png"
+          python tools/convert_studio_webp.py             "/tmp/studio-output/${{ matrix.slug }}.png"             "/tmp/studio-output/${{ matrix.slug }}.webp"
+          test -s "/tmp/studio-output/${{ matrix.slug }}.webp"
+
+      - name: Upload rendered asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-${{ matrix.slug }}
+          path: /tmp/studio-output/${{ matrix.slug }}.webp
+          if-no-files-found: error
+          retention-days: 2
+
+  collect:
+    needs: [matrix, render]
+    if: ${{ always() && needs.render.result == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: feat/blender-studio-assets
+
+      - name: Download all Studio assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: studio-*
+          path: /tmp/studio-assets
+          merge-multiple: true
+
+      - name: Verify complete set
+        run: |
+          mkdir -p apps/stl-service/static/studio/engineering
+          rm -f apps/stl-service/static/studio/engineering/*.webp
+          cp /tmp/studio-assets/*.webp apps/stl-service/static/studio/engineering/
+          count="$(find apps/stl-service/static/studio/engineering -maxdepth 1 -name '*.webp' | wc -l)"
+          echo "Collected $count Studio assets"
+          test "$count" -eq 54
+
+      - name: Commit 54 Studio assets
+        run: |
+          git config user.name "teknovashop-studio-bot"
+          git config user.email "studio-bot@users.noreply.github.com"
+          git add apps/stl-service/static/studio/engineering
+          if git diff --cached --quiet; then
+            echo "No Studio asset changes"
+            exit 0
+          fi
+          git commit -m "Generate 54 canonical Studio assets [skip ci]"
+          git push origin HEAD:feat/blender-studio-assets

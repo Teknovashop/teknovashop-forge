@@ -11,6 +11,7 @@ import traceback
 import types
 from datetime import datetime, timezone
 from uuid import uuid4
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, List, Callable, Literal
 
 import trimesh
@@ -757,6 +758,35 @@ def debug_storage(request: Request):
         return result
 
 
+STUDIO_ENGINEERING_DIR = Path(__file__).resolve().parent / "static" / "studio" / "engineering"
+
+
+def _engineering_studio_asset(slug: str) -> Optional[Path]:
+    path = STUDIO_ENGINEERING_DIR / f"{slug}.webp"
+    try:
+        return path if path.is_file() and path.stat().st_size > 1000 else None
+    except OSError:
+        return None
+
+
+@app.get("/catalog/studio/{slug}.webp")
+def catalog_studio_asset(slug: str):
+    storage_slug = _slug_for_storage(_norm_slug_for_builder(slug))
+    if storage_slug not in PRODUCTS:
+        raise HTTPException(status_code=404, detail="Product not found")
+    path = _engineering_studio_asset(storage_slug)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Studio asset not ready")
+    return Response(
+        content=path.read_bytes(),
+        media_type="image/webp",
+        headers={
+            "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.get("/catalog/products")
 def catalog_products(stage: Optional[str] = None, public_only: bool = False):
     """Canonical product feed for storefront, Forge V2 and release QA.
@@ -784,6 +814,7 @@ def catalog_products(stage: Optional[str] = None, public_only: bool = False):
         if stage and release_stage != stage:
             continue
 
+        studio_asset = _engineering_studio_asset(slug)
         products.append(
             {
                 "slug": slug,
@@ -791,8 +822,15 @@ def catalog_products(stage: Optional[str] = None, public_only: bool = False):
                 "family": metadata.get("family") or "Forge",
                 "description": metadata.get("description") or "",
                 "tips": metadata.get("tips") or [],
-                "marketing_image": metadata.get("marketing_image"),
-                "visual_source": metadata.get("visual_source") or "generated_preview",
+                "marketing_image": (
+                    metadata.get("marketing_image")
+                    or (f"/catalog/studio/{slug}.webp" if studio_asset else None)
+                ),
+                "visual_source": (
+                    metadata.get("visual_source")
+                    if metadata.get("marketing_image")
+                    else ("studio_asset" if studio_asset else "generated_preview")
+                ),
                 "version": contract["version"],
                 "stage": release_stage,
                 "public": release_stage in PUBLIC_STAGES,
@@ -840,14 +878,23 @@ def catalog_product(slug: str):
         contract.get("stage") or metadata.get("stage") or "engineering"
     )
 
+    studio_asset = _engineering_studio_asset(storage_slug)
+
     return {
         "slug": storage_slug,
         "name": metadata.get("name") or contract["name"],
         "family": metadata.get("family") or "Forge",
         "description": metadata.get("description") or "",
         "tips": metadata.get("tips") or [],
-        "marketing_image": metadata.get("marketing_image"),
-        "visual_source": metadata.get("visual_source") or "generated_preview",
+        "marketing_image": (
+            metadata.get("marketing_image")
+            or (f"/catalog/studio/{storage_slug}.webp" if studio_asset else None)
+        ),
+        "visual_source": (
+            metadata.get("visual_source")
+            if metadata.get("marketing_image")
+            else ("studio_asset" if studio_asset else "generated_preview")
+        ),
         "version": contract["version"],
         "stage": release_stage,
         "public": release_stage in PUBLIC_STAGES,
