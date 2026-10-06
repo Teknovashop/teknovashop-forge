@@ -57,6 +57,7 @@ jobs:
             png="static/studio/engineering/$slug.png"
             webp="static/studio/engineering/$slug.webp"
             blender -b --python tools/blender_render_product.py -- "$stl" "$png"
+            test -s "$png"
             python tools/convert_studio_webp.py "$png" "$webp"
             rm -f "$png"
           done
