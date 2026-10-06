@@ -84,9 +84,17 @@ def main():
     scene.render.film_transparent = False
     scene.render.filepath = str(output_path)
     scene.render.image_settings.color_mode = "RGBA"
-    scene.view_settings.view_transform = "Filmic"
-    scene.view_settings.look = "Medium High Contrast"
-    scene.view_settings.exposure = 0.35
+    # GitHub's Ubuntu Blender build may expose only the Standard color
+    # transform in headless mode. Keep the pipeline portable and apply the
+    # final contrast/color polish in Pillow after rendering.
+    try:
+        if "Filmic" in [item.identifier for item in scene.bl_rna.properties["view_settings"].fixed_type.properties["view_transform"].enum_items]:
+            scene.view_settings.view_transform = "Filmic"
+        else:
+            scene.view_settings.view_transform = "Standard"
+    except Exception:
+        scene.view_settings.view_transform = "Standard"
+    scene.view_settings.exposure = 0.15
     scene.view_settings.gamma = 1.0
 
     world = scene.world
