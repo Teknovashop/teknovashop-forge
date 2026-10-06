@@ -28,6 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--stage", default="engineering")
+    parser.add_argument("--slug")
     args = parser.parse_args()
 
     output = Path(args.output)
@@ -35,7 +36,9 @@ def main() -> None:
 
     selected = []
     for slug, metadata in PRODUCT_METADATA.items():
-        if metadata.get("stage") != args.stage:
+        if args.slug and slug != args.slug:
+            continue
+        if not args.slug and metadata.get("stage") != args.stage:
             continue
         contract = PRODUCTS[slug]
         builder = REGISTRY[contract["builder"]]
