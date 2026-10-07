@@ -1,4 +1,5 @@
 name: Build Studio Assets
+# Render trigger: five corrected engineering products
 
 on:
   push:
