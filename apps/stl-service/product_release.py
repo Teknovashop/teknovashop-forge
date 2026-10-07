@@ -85,7 +85,11 @@ def audit_product(slug: str) -> dict[str, Any]:
         image = metadata.get("marketing_image")
         check(
             "production_marketing_asset",
-            isinstance(image, str) and image.startswith("/images/products/professional/"),
+            isinstance(image, str)
+            and image.startswith((
+                "/images/products/professional/",
+                "/images/products/premium-v1/",
+            )),
             str(image),
         )
         check("production_visual_source", metadata.get("visual_source") == "studio_asset")
