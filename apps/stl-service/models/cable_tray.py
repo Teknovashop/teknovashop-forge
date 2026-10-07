@@ -70,7 +70,15 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
             cutters[0] if len(cutters) == 1 else union(cutters),
         )
 
-    mesh = trimesh.util.concatenate([base, left, right, *braces])
+    # Forge V2 operations run booleans over the complete product.  Returning
+    # overlapping concatenated bodies makes later cuts non-manifold even when
+    # each component is individually watertight.  Resolve the tray into one
+    # canonical manifold solid before exposing advanced operations.
+    mesh = union([base, left, right, *braces])
+    if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+        raise ValueError("Cable tray union did not produce a valid solid")
+    if not mesh.is_watertight or not mesh.is_winding_consistent:
+        raise ValueError("Cable tray must be a watertight manifold before Forge operations")
     mesh.metadata = {"name": "cable_tray", "unit": "mm"}
     return mesh
 
