@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 import trimesh
 
-from models._helpers import difference, union
+from models._helpers import difference
 
 
 def _box(extents, center):
@@ -26,7 +26,7 @@ def build_vesa_offset_adapter(p):
                 hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
                 hole.apply_translation((cx + sx*vesa/2, sy*vesa/2, thickness/2))
                 cutters.append(hole)
-    plate=difference(plate, union(cutters))
+    plate=difference(plate, cutters)
     bridge=_box((max(20,abs(offset)+20),height*0.20,thickness*0.8),(0,0,thickness*1.4))
     return _concat(plate,bridge)
 
@@ -53,7 +53,7 @@ def build_perforated_mount_plate(p):
             hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
             hole.apply_translation((x,y,thickness/2))
             cutters.append(hole)
-    return difference(plate, union(cutters))
+    return difference(plate, cutters)
 
 
 def build_circular_pattern_adapter(p):
@@ -67,7 +67,7 @@ def build_circular_pattern_adapter(p):
         hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
         hole.apply_translation((math.cos(angle)*pcd/2, math.sin(angle)*pcd/2, thickness/2))
         cutters.append(hole)
-    disc=difference(disc, union(cutters))
+    disc=difference(disc, cutters)
     hub=trimesh.creation.cylinder(radius=hub_d/2,height=boss_h,sections=48); hub.apply_translation((0,0,thickness+boss_h/2))
     return _concat(disc,hub)
 
