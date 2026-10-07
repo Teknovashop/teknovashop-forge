@@ -2,8 +2,6 @@ from __future__ import annotations
 import math
 import trimesh
 
-from models._helpers import difference
-
 
 def _box(extents, center):
     mesh = trimesh.creation.box(extents=tuple(float(x) for x in extents))
@@ -26,7 +24,8 @@ def build_vesa_offset_adapter(p):
                 hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
                 hole.apply_translation((cx + sx*vesa/2, sy*vesa/2, thickness/2))
                 cutters.append(hole)
-    plate=difference(plate, cutters)
+    for cutter in cutters:
+        plate=trimesh.boolean.difference([plate, cutter], engine="manifold")
     bridge=_box((max(20,abs(offset)+20),height*0.20,thickness*0.8),(0,0,thickness*1.4))
     return _concat(plate,bridge)
 
@@ -67,7 +66,8 @@ def build_circular_pattern_adapter(p):
         hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
         hole.apply_translation((math.cos(angle)*pcd/2, math.sin(angle)*pcd/2, thickness/2))
         cutters.append(hole)
-    disc=difference(disc, cutters)
+    for cutter in cutters:
+        disc=trimesh.boolean.difference([disc, cutter], engine="manifold")
     hub=trimesh.creation.cylinder(radius=hub_d/2,height=boss_h,sections=48); hub.apply_translation((0,0,thickness+boss_h/2))
     return _concat(disc,hub)
 
