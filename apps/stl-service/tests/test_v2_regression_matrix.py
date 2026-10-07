@@ -6,7 +6,11 @@ import pytest
 
 from model_contracts import PRODUCTS
 from models import REGISTRY
-from v2_operations import apply_operations, validate_operations
+from v2_operations import (
+    ADVANCED_CAPABILITIES,
+    apply_operations,
+    validate_operations,
+)
 
 
 def _mesh(slug):
@@ -179,3 +183,73 @@ def test_operation_outside_safe_face_fails_closed():
                 "params": {"diameter_mm": 10},
             }],
         )
+
+
+UI_DEFAULT_OPERATIONS = {
+    "hole": {"diameter_mm": 6},
+    "slot": {"length_mm": 24, "width_mm": 6},
+    "cutout_rect": {"width_mm": 24, "height_mm": 14},
+    "cutout_circle": {"diameter_mm": 18},
+    "counterbore": {
+        "through_diameter_mm": 5,
+        "bore_diameter_mm": 10,
+        "bore_depth_mm": 2,
+    },
+    "pocket_rect": {"width_mm": 28, "height_mm": 18, "depth_mm": 1.2},
+    "hole_pattern": {
+        "diameter_mm": 4,
+        "rows": 2,
+        "cols": 2,
+        "spacing_x_mm": 18,
+        "spacing_y_mm": 18,
+    },
+    "vesa_pattern": {"pitch_mm": 75, "diameter_mm": 5},
+    "vent_linear": {"count": 5, "length_mm": 32, "width_mm": 3, "spacing_mm": 7},
+    "vent_hex": {"rows": 2, "cols": 3, "radius_mm": 3, "gap_mm": 2},
+    "scallop_pattern": {"count": 3, "diameter_mm": 6, "spacing_mm": 9},
+    "cable_channel": {"length_mm": 28, "width_mm": 7},
+    "rib": {"length_mm": 30, "width_mm": 4, "height_mm": 4},
+    "boss": {"diameter_mm": 14, "height_mm": 4},
+    "wave_ribs": {
+        "length_mm": 36,
+        "rib_width_mm": 2,
+        "amplitude_mm": 4,
+        "count": 5,
+        "spacing_mm": 5,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "slug,operation_type,target_face",
+    [
+        (slug, operation_type, target_face)
+        for slug, capabilities in sorted(ADVANCED_CAPABILITIES.items())
+        for operation_type in sorted(capabilities)
+        for target_face in ("top", "bottom")
+    ],
+)
+def test_every_ui_exposed_operation_generates_valid_geometry(
+    slug, operation_type, target_face
+):
+    """Every operation/face combination offered by Forge must really work."""
+    mesh = _mesh(slug)
+    operation = {
+        "id": f"qa-{slug}-{operation_type}-{target_face}",
+        "type": operation_type,
+        "version": 1,
+        "enabled": True,
+        "target": {"face": target_face},
+        "placement": {"x": 0, "y": 0, "rotation_deg": 0},
+        "params": dict(UI_DEFAULT_OPERATIONS[operation_type]),
+    }
+
+    assert validate_operations(slug, [operation]) == []
+    result = apply_operations(mesh, slug, [operation])
+
+    assert result.is_watertight, f"{slug}/{operation_type}/{target_face} is not watertight"
+    assert result.is_winding_consistent, f"{slug}/{operation_type}/{target_face} has inconsistent winding"
+    assert len(result.faces) > 0, f"{slug}/{operation_type}/{target_face} produced no faces"
+    assert _stl_hash(result) != _stl_hash(mesh), (
+        f"{slug}/{operation_type}/{target_face} is exposed in the UI but does not change geometry"
+    )

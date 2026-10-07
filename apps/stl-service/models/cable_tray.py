@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any
 import trimesh
-from ._helpers import difference, parse_holes, union
+from ._helpers import parse_holes, union
 
 NAME = "cable_tray"
 SLUGS = ["cable-tray", "bandeja-cables"]
@@ -61,16 +61,27 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         cutter.apply_translation((x, y, wall / 2.0))
         cutters.append(cutter)
 
-    if cutters:
-        # Free holes belong to the tray floor. Cut the watertight base before
-        # concatenating the side walls/braces; booleaning the already
-        # overlapping multi-body assembly can create non-manifold edges.
-        base = difference(
-            base,
-            cutters[0] if len(cutters) == 1 else union(cutters),
-        )
+    # Forge operations must see a single manifold body. Build that canonical
+    # body first, then apply free-hole cutters to the resolved solid. Cutting
+    # only the floor before the union can let a later brace fill the hole back in.
+    mesh = union([base, left, right, *braces])
+    if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+        raise ValueError("Cable tray union did not produce a valid solid")
+    if not mesh.is_watertight or not mesh.is_winding_consistent:
+        raise ValueError("Cable tray must be a watertight manifold before Forge operations")
 
-    mesh = trimesh.util.concatenate([base, left, right, *braces])
+    if cutters:
+        for cutter in cutters:
+            try:
+                result = trimesh.boolean.difference([mesh, cutter], engine="manifold")
+            except Exception as exc:
+                raise ValueError("Cable tray free-hole boolean failed") from exc
+            if not isinstance(result, trimesh.Trimesh) or not len(result.faces):
+                raise ValueError("Cable tray free holes did not produce a valid solid")
+            mesh = result
+        if not mesh.is_watertight or not mesh.is_winding_consistent:
+            raise ValueError("Cable tray free holes must preserve a watertight manifold")
+
     mesh.metadata = {"name": "cable_tray", "unit": "mm"}
     return mesh
 
