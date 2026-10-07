@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       slugs: ${{ steps.products.outputs.slugs }}
+      has_products: ${{ steps.products.outputs.has_products }}
     defaults:
       run:
         working-directory: apps/stl-service
@@ -51,14 +52,15 @@ jobs:
           import json, os
           from product_catalog import PRODUCT_METADATA
           slugs = [slug for slug, meta in PRODUCT_METADATA.items() if meta.get("stage") == "engineering"]
-          assert slugs, "No engineering products found"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("slugs=" + json.dumps(slugs, separators=(",", ":")) + "\n")
-          print("\n".join(slugs))
+              fh.write("has_products=" + ("true" if slugs else "false") + "\n")
+          print("\n".join(slugs) if slugs else "No engineering products remain")
           PY
 
   render:
     needs: matrix
+    if: ${{ needs.matrix.outputs.has_products == 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     strategy:
@@ -114,7 +116,7 @@ jobs:
 
   collect:
     needs: [matrix, render]
-    if: ${{ always() && needs.render.result == 'success' }}
+    if: ${{ always() && needs.matrix.outputs.has_products == 'true' && needs.render.result == 'success' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

@@ -17,15 +17,8 @@ def test_production_release_is_explicit_and_visual_asset_backed():
     production = [slug for slug, meta in PRODUCT_METADATA.items() if meta["stage"] == "production"]
     engineering = [slug for slug, meta in PRODUCT_METADATA.items() if meta["stage"] == "engineering"]
 
-    assert len(production) == 67
-    assert len(engineering) == 5
-    assert set(engineering) == {
-        "vesa-offset-adapter",
-        "perforated-mount-plate",
-        "circular-pattern-adapter",
-        "vesa-shelf-adapter",
-        "multipattern-transition-plate",
-    }
+    assert len(production) == 72
+    assert len(engineering) == 0
 
     for slug in production:
         meta = PRODUCT_METADATA[slug]
@@ -45,7 +38,7 @@ def test_production_release_is_explicit_and_visual_asset_backed():
         slug for slug in production
         if PRODUCT_METADATA[slug]["marketing_image"].startswith("/images/products/premium-v1/")
     ]
-    assert len(premium) == 49
+    assert len(premium) == 54
 
 
 def test_catalog_contracts_keep_builder_and_release_metadata_separate():
