@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import trimesh
 
+from models._helpers import difference, union
+
 
 def _box(extents, center):
     mesh = trimesh.creation.box(extents=tuple(float(x) for x in extents))
@@ -16,10 +18,19 @@ def _concat(*parts):
 
 def build_vesa_shelf_adapter(p):
     width=float(p.get("width",180)); height=float(p.get("height",120)); depth=float(p.get("depth",65)); thickness=float(p.get("thickness",5))
-    plate=_box((width,height,thickness),(0,0,thickness/2))
-    shelf=_box((width,depth,thickness),(0,-depth/2,height*0.15))
-    lip=_box((width,thickness,20),(0,-depth+thickness/2,height*0.15+10))
-    return _concat(plate,shelf,lip)
+    vesa=float(p.get("vesa",100)); hole_d=float(p.get("hole_d",5))
+    back=_box((width,thickness,height),(0,0,height/2))
+    cutters=[]
+    for sx in (-1, 1):
+        for sz in (-1, 1):
+            hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
+            hole.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2,[1,0,0]))
+            hole.apply_translation((sx*vesa/2,0,height/2 + sz*vesa/2))
+            cutters.append(hole)
+    back=difference(back, union(cutters))
+    shelf=_box((width,depth,thickness),(0,-depth/2,thickness/2))
+    lip=_box((width,thickness,20),(0,-depth+thickness/2,10))
+    return _concat(back,shelf,lip)
 
 
 def build_universal_wall_mount(p):
@@ -31,11 +42,17 @@ def build_universal_wall_mount(p):
 
 
 def build_multipattern_transition_plate(p):
-    width=float(p.get("width",180)); height=float(p.get("height",140)); thickness=float(p.get("thickness",5)); bridge=float(p.get("bridge",24))
+    width=float(p.get("width",180)); height=float(p.get("height",140)); thickness=float(p.get("thickness",5))
+    pattern_a=float(p.get("pattern_a",75)); pattern_b=float(p.get("pattern_b",100)); hole_d=float(p.get("hole_d",5))
     plate=_box((width,height,thickness),(0,0,thickness/2))
-    a=_box((bridge,height*0.72,thickness*1.7),(-width*0.22,0,thickness*0.85))
-    b=_box((bridge,height*0.72,thickness*1.7),(width*0.22,0,thickness*0.85))
-    return _concat(plate,a,b)
+    cutters=[]
+    for pattern in (pattern_a, pattern_b):
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
+                hole.apply_translation((sx*pattern/2, sy*pattern/2, thickness/2))
+                cutters.append(hole)
+    return difference(plate, union(cutters))
 
 
 def build_monitor_riser(p):
