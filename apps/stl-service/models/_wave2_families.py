@@ -52,7 +52,9 @@ def build_perforated_mount_plate(p):
             hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
             hole.apply_translation((x,y,thickness/2))
             cutters.append(hole)
-    return difference(plate, cutters)
+    for cutter in cutters:
+        plate=trimesh.boolean.difference([plate, cutter], engine="manifold")
+    return plate
 
 
 def build_circular_pattern_adapter(p):
