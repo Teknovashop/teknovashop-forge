@@ -2,6 +2,8 @@ from __future__ import annotations
 import math
 import trimesh
 
+from models._helpers import difference, union
+
 
 def _box(extents, center):
     mesh = trimesh.creation.box(extents=tuple(float(x) for x in extents))
@@ -15,8 +17,17 @@ def _concat(*parts):
 
 def build_vesa_offset_adapter(p):
     width=float(p.get("width",150)); height=float(p.get("height",120)); thickness=float(p.get("thickness",5)); offset=float(p.get("offset",35))
+    vesa=float(p.get("vesa",75)); hole_d=float(p.get("hole_d",5))
     plate=_box((width,height,thickness),(0,0,thickness/2))
-    bridge=_box((max(20,abs(offset)+20),height*0.28,thickness*1.6),(offset/2,0,thickness*0.8))
+    cutters=[]
+    for cx in (-offset/2, offset/2):
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
+                hole.apply_translation((cx + sx*vesa/2, sy*vesa/2, thickness/2))
+                cutters.append(hole)
+    plate=difference(plate, union(cutters))
+    bridge=_box((max(20,abs(offset)+20),height*0.20,thickness*0.8),(0,0,thickness*1.4))
     return _concat(plate,bridge)
 
 
@@ -29,16 +40,34 @@ def build_under_desk_mount(p):
 
 
 def build_perforated_mount_plate(p):
-    width=float(p.get("width",150)); height=float(p.get("height",100)); thickness=float(p.get("thickness",5)); boss=float(p.get("boss",12))
+    width=float(p.get("width",150)); height=float(p.get("height",100)); thickness=float(p.get("thickness",5))
+    hole_d=float(p.get("hole_d",5)); spacing=float(p.get("spacing",28))
+    rows=max(2,min(int(round(float(p.get("rows",3)))),6))
+    cols=max(2,min(int(round(float(p.get("cols",4)))),8))
     plate=_box((width,height,thickness),(0,0,thickness/2))
-    b1=trimesh.creation.cylinder(radius=boss/2,height=thickness*1.8,sections=36); b1.apply_translation((-width*0.3,0,thickness*0.9))
-    b2=b1.copy(); b2.apply_translation((width*0.6,0,0))
-    return _concat(plate,b1,b2)
+    cutters=[]
+    for row in range(rows):
+        y=(row-(rows-1)/2)*spacing
+        for col in range(cols):
+            x=(col-(cols-1)/2)*spacing
+            hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
+            hole.apply_translation((x,y,thickness/2))
+            cutters.append(hole)
+    return difference(plate, union(cutters))
 
 
 def build_circular_pattern_adapter(p):
     outer_d=float(p.get("outer_d",100)); hub_d=float(p.get("hub_d",36)); thickness=float(p.get("thickness",6)); boss_h=float(p.get("boss_h",8))
+    pcd=float(p.get("pcd",72)); hole_d=float(p.get("hole_d",5))
+    bolt_count=max(3,min(int(round(float(p.get("bolt_count",6)))),12))
     disc=trimesh.creation.cylinder(radius=outer_d/2,height=thickness,sections=72); disc.apply_translation((0,0,thickness/2))
+    cutters=[]
+    for i in range(bolt_count):
+        angle=2*math.pi*i/bolt_count
+        hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
+        hole.apply_translation((math.cos(angle)*pcd/2, math.sin(angle)*pcd/2, thickness/2))
+        cutters.append(hole)
+    disc=difference(disc, union(cutters))
     hub=trimesh.creation.cylinder(radius=hub_d/2,height=boss_h,sections=48); hub.apply_translation((0,0,thickness+boss_h/2))
     return _concat(disc,hub)
 
