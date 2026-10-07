@@ -269,8 +269,8 @@ PRODUCTS = {
     },
     "vesa-offset-adapter": {
         "builder": "vesa_offset_adapter", "name": "Adaptador VESA offset",
-        "default": {"width": 150.0, "height": 120.0, "thickness": 5.0, "offset": 35.0},
-        "variant": {"width": 180.0, "offset": 55.0}, "min_extents": (120.0, 90.0, 4.0),
+        "default": {"width": 150.0, "height": 120.0, "thickness": 5.0, "offset": 35.0, "vesa": 75.0, "hole_d": 5.0},
+        "variant": {"width": 180.0, "offset": 55.0, "vesa": 100.0}, "min_extents": (120.0, 90.0, 4.0),
     },
     "under-desk-mount": {
         "builder": "under_desk_mount", "name": "Montura bajo mesa universal",
@@ -278,14 +278,14 @@ PRODUCTS = {
         "variant": {"width": 170.0, "depth": 115.0}, "min_extents": (90.0, 60.0, 35.0),
     },
     "perforated-mount-plate": {
-        "builder": "perforated_mount_plate", "name": "Placa técnica configurable",
-        "default": {"width": 150.0, "height": 100.0, "thickness": 5.0, "boss": 12.0},
-        "variant": {"width": 190.0, "boss": 18.0}, "min_extents": (100.0, 70.0, 4.0),
+        "builder": "perforated_mount_plate", "name": "Placa técnica perforada configurable",
+        "default": {"width": 150.0, "height": 100.0, "thickness": 5.0, "hole_d": 5.0, "spacing": 28.0, "rows": 3, "cols": 4},
+        "variant": {"width": 190.0, "spacing": 32.0, "rows": 4, "cols": 5}, "min_extents": (100.0, 70.0, 4.0),
     },
     "circular-pattern-adapter": {
         "builder": "circular_pattern_adapter", "name": "Adaptador de patrón circular",
-        "default": {"outer_d": 100.0, "hub_d": 36.0, "thickness": 6.0, "boss_h": 8.0},
-        "variant": {"outer_d": 125.0, "hub_d": 46.0}, "min_extents": (70.0, 70.0, 10.0),
+        "default": {"outer_d": 100.0, "hub_d": 36.0, "thickness": 6.0, "boss_h": 8.0, "pcd": 72.0, "hole_d": 5.0, "bolt_count": 6},
+        "variant": {"outer_d": 125.0, "hub_d": 46.0, "pcd": 90.0, "bolt_count": 8}, "min_extents": (70.0, 70.0, 10.0),
     },
     "phone-landscape-stand": {
         "builder": "phone_landscape_stand", "name": "Soporte móvil horizontal / vertical",
@@ -357,9 +357,9 @@ PRODUCTS = {
         "default": {"width": 160.0, "height": 60.0, "depth": 48.0, "slots": 5},
         "variant": {"width": 210.0, "slots": 7}, "min_extents": (105.0, 30.0, 40.0),
     },
-    "vesa-shelf-adapter": {"builder":"vesa_shelf_adapter","name":"Adaptador VESA a bandeja","default":{"width":180.0,"height":120.0,"depth":65.0,"thickness":5.0},"variant":{"width":220.0,"depth":85.0},"min_extents":(120.0,60.0,20.0)},
+    "vesa-shelf-adapter": {"builder":"vesa_shelf_adapter","name":"Adaptador VESA a bandeja","default":{"width":180.0,"height":120.0,"depth":65.0,"thickness":5.0,"vesa":100.0,"hole_d":5.0},"variant":{"width":220.0,"depth":85.0,"vesa":75.0},"min_extents":(120.0,60.0,20.0)},
     "universal-wall-mount": {"builder":"universal_wall_mount","name":"Montura mural universal","default":{"width":130.0,"height":90.0,"depth":55.0,"wall":4.0},"variant":{"width":165.0,"depth":75.0},"min_extents":(90.0,45.0,50.0)},
-    "multipattern-transition-plate": {"builder":"multipattern_transition_plate","name":"Placa de transición multipatrón","default":{"width":180.0,"height":140.0,"thickness":5.0,"bridge":24.0},"variant":{"width":220.0,"bridge":32.0},"min_extents":(130.0,100.0,4.0)},
+    "multipattern-transition-plate": {"builder":"multipattern_transition_plate","name":"Placa de transición multipatrón","default":{"width":180.0,"height":140.0,"thickness":5.0,"pattern_a":75.0,"pattern_b":100.0,"hole_d":5.0},"variant":{"width":220.0,"pattern_a":100.0,"pattern_b":120.0},"min_extents":(130.0,100.0,4.0)},
     "monitor-riser": {"builder":"monitor_riser","name":"Elevador de monitor compacto","default":{"width":420.0,"depth":210.0,"height":85.0,"wall":5.0},"variant":{"width":480.0,"height":105.0},"min_extents":(320.0,150.0,60.0)},
     "tablet-angle-stand": {"builder":"tablet_angle_stand","name":"Soporte tablet de ángulo configurable","default":{"width":170.0,"depth":145.0,"back_h":125.0,"wall":4.0,"angle_deg":62.0},"variant":{"width":205.0,"angle_deg":70.0},"min_extents":(120.0,80.0,70.0)},
     "microphone-desk-adapter": {"builder":"microphone_desk_adapter","name":"Adaptador de micrófono a escritorio","default":{"base_d":72.0,"stem_h":55.0,"stem_d":22.0,"collar_d":34.0},"variant":{"base_d":86.0,"stem_h":72.0},"min_extents":(45.0,45.0,55.0)},

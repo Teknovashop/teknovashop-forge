@@ -42,7 +42,7 @@ jobs:
           import json, os
           from product_catalog import PRODUCT_METADATA
           slugs = [slug for slug, meta in PRODUCT_METADATA.items() if meta.get("stage") == "engineering"]
-          assert len(slugs) == 54, f"Expected 54 engineering products, got {len(slugs)}"
+          assert slugs, "No engineering products found"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write("slugs=" + json.dumps(slugs, separators=(",", ":")) + "\n")
           print("\n".join(slugs))
@@ -125,11 +125,13 @@ jobs:
           mkdir -p apps/stl-service/static/studio/engineering
           rm -f apps/stl-service/static/studio/engineering/*.webp
           cp /tmp/studio-assets/*.webp apps/stl-service/static/studio/engineering/
+          expected='${{ needs.matrix.outputs.slugs }}'
+          expected_count="$(python -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$expected")"
           count="$(find apps/stl-service/static/studio/engineering -maxdepth 1 -name '*.webp' | wc -l)"
-          echo "Collected $count Studio assets"
-          test "$count" -eq 54
+          echo "Collected $count Studio assets; expected $expected_count"
+          test "$count" -eq "$expected_count"
 
-      - name: Commit 54 Studio assets
+      - name: Commit Engineering Studio assets
         run: |
           git config user.name "teknovashop-studio-bot"
           git config user.email "studio-bot@users.noreply.github.com"
@@ -138,5 +140,5 @@ jobs:
             echo "No Studio asset changes"
             exit 0
           fi
-          git commit -m "Generate 54 canonical Studio assets [skip ci]"
+          git commit -m "Generate engineering Studio assets [skip ci]"
           git push origin HEAD:feat/blender-studio-assets

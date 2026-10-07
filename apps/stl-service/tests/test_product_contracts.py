@@ -203,3 +203,18 @@ def test_product_contracts_have_required_metadata():
         assert "free_holes" in contract["capabilities"], f"{slug}: missing free_holes capability"
         assert contract["default"], f"{slug}: default parameters are empty"
         assert contract["variant"], f"{slug}: variant parameters are empty"
+
+
+def test_blocked_products_expose_native_mounting_patterns():
+    expected = {
+        "vesa-offset-adapter": {"vesa", "hole_d", "offset"},
+        "perforated-mount-plate": {"hole_d", "spacing", "rows", "cols"},
+        "circular-pattern-adapter": {"pcd", "hole_d", "bolt_count"},
+        "vesa-shelf-adapter": {"vesa", "hole_d"},
+        "multipattern-transition-plate": {"pattern_a", "pattern_b", "hole_d"},
+    }
+    for slug, keys in expected.items():
+        assert keys <= set(PRODUCTS[slug]["default"]), (
+            f"{slug}: missing native pattern parameters "
+            f"{sorted(keys - set(PRODUCTS[slug]['default']))}"
+        )
