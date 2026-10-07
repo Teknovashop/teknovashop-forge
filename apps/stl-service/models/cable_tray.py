@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Any
 import trimesh
-from ._helpers import difference, parse_holes, union
+from ._helpers import parse_holes, union
 
 NAME = "cable_tray"
 SLUGS = ["cable-tray", "bandeja-cables"]
@@ -71,9 +71,14 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         raise ValueError("Cable tray must be a watertight manifold before Forge operations")
 
     if cutters:
-        mesh = difference(mesh, cutters)
-        if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
-            raise ValueError("Cable tray free holes did not produce a valid solid")
+        for cutter in cutters:
+            try:
+                result = trimesh.boolean.difference([mesh, cutter], engine="manifold")
+            except Exception as exc:
+                raise ValueError("Cable tray free-hole boolean failed") from exc
+            if not isinstance(result, trimesh.Trimesh) or not len(result.faces):
+                raise ValueError("Cable tray free holes did not produce a valid solid")
+            mesh = result
         if not mesh.is_watertight or not mesh.is_winding_consistent:
             raise ValueError("Cable tray free holes must preserve a watertight manifold")
 
