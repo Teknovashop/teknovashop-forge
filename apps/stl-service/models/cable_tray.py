@@ -61,24 +61,22 @@ def make_model(params: Dict[str, Any]) -> trimesh.Trimesh:
         cutter.apply_translation((x, y, wall / 2.0))
         cutters.append(cutter)
 
-    if cutters:
-        # Free holes belong to the tray floor. Cut the watertight base before
-        # concatenating the side walls/braces; booleaning the already
-        # overlapping multi-body assembly can create non-manifold edges.
-        base = difference(
-            base,
-            cutters[0] if len(cutters) == 1 else union(cutters),
-        )
-
-    # Forge V2 operations run booleans over the complete product.  Returning
-    # overlapping concatenated bodies makes later cuts non-manifold even when
-    # each component is individually watertight.  Resolve the tray into one
-    # canonical manifold solid before exposing advanced operations.
+    # Forge operations must see a single manifold body. Build that canonical
+    # body first, then apply free-hole cutters to the resolved solid. Cutting
+    # only the floor before the union can let a later brace fill the hole back in.
     mesh = union([base, left, right, *braces])
     if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
         raise ValueError("Cable tray union did not produce a valid solid")
     if not mesh.is_watertight or not mesh.is_winding_consistent:
         raise ValueError("Cable tray must be a watertight manifold before Forge operations")
+
+    if cutters:
+        mesh = difference(mesh, cutters)
+        if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+            raise ValueError("Cable tray free holes did not produce a valid solid")
+        if not mesh.is_watertight or not mesh.is_winding_consistent:
+            raise ValueError("Cable tray free holes must preserve a watertight manifold")
+
     mesh.metadata = {"name": "cable_tray", "unit": "mm"}
     return mesh
 
