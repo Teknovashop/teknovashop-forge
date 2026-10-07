@@ -221,22 +221,25 @@ UI_DEFAULT_OPERATIONS = {
 
 
 @pytest.mark.parametrize(
-    "slug,operation_type",
+    "slug,operation_type,target_face",
     [
-        (slug, operation_type)
+        (slug, operation_type, target_face)
         for slug, capabilities in sorted(ADVANCED_CAPABILITIES.items())
         for operation_type in sorted(capabilities)
+        for target_face in ("top", "bottom")
     ],
 )
-def test_every_ui_exposed_operation_generates_valid_geometry(slug, operation_type):
-    """No operation may be shown in Forge unless its default UI action really works."""
+def test_every_ui_exposed_operation_generates_valid_geometry(
+    slug, operation_type, target_face
+):
+    """Every operation/face combination offered by Forge must really work."""
     mesh = _mesh(slug)
     operation = {
-        "id": f"qa-{slug}-{operation_type}",
+        "id": f"qa-{slug}-{operation_type}-{target_face}",
         "type": operation_type,
         "version": 1,
         "enabled": True,
-        "target": {"face": "bottom" if slug == "cable-tray" else "top"},
+        "target": {"face": target_face},
         "placement": {"x": 0, "y": 0, "rotation_deg": 0},
         "params": dict(UI_DEFAULT_OPERATIONS[operation_type]),
     }
@@ -244,9 +247,9 @@ def test_every_ui_exposed_operation_generates_valid_geometry(slug, operation_typ
     assert validate_operations(slug, [operation]) == []
     result = apply_operations(mesh, slug, [operation])
 
-    assert result.is_watertight, f"{slug}/{operation_type} is not watertight"
-    assert result.is_winding_consistent, f"{slug}/{operation_type} has inconsistent winding"
-    assert len(result.faces) > 0, f"{slug}/{operation_type} produced no faces"
+    assert result.is_watertight, f"{slug}/{operation_type}/{target_face} is not watertight"
+    assert result.is_winding_consistent, f"{slug}/{operation_type}/{target_face} has inconsistent winding"
+    assert len(result.faces) > 0, f"{slug}/{operation_type}/{target_face} produced no faces"
     assert _stl_hash(result) != _stl_hash(mesh), (
-        f"{slug}/{operation_type} is exposed in the UI but does not change geometry"
+        f"{slug}/{operation_type}/{target_face} is exposed in the UI but does not change geometry"
     )
