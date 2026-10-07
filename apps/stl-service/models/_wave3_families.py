@@ -3,8 +3,6 @@ from __future__ import annotations
 import math
 import trimesh
 
-from models._helpers import difference
-
 
 def _box(extents, center):
     mesh = trimesh.creation.box(extents=tuple(float(x) for x in extents))
@@ -27,7 +25,8 @@ def build_vesa_shelf_adapter(p):
             hole.apply_transform(trimesh.transformations.rotation_matrix(math.pi/2,[1,0,0]))
             hole.apply_translation((sx*vesa/2,0,height/2 + sz*vesa/2))
             cutters.append(hole)
-    back=difference(back, cutters)
+    for cutter in cutters:
+        back=trimesh.boolean.difference([back, cutter], engine="manifold")
     shelf=_box((width,depth,thickness),(0,-depth/2,thickness/2))
     lip=_box((width,thickness,20),(0,-depth+thickness/2,10))
     return _concat(back,shelf,lip)
@@ -52,7 +51,9 @@ def build_multipattern_transition_plate(p):
                 hole=trimesh.creation.cylinder(radius=hole_d/2,height=thickness*2.4,sections=48)
                 hole.apply_translation((sx*pattern/2, sy*pattern/2, thickness/2))
                 cutters.append(hole)
-    return difference(plate, cutters)
+    for cutter in cutters:
+        plate=trimesh.boolean.difference([plate, cutter], engine="manifold")
+    return plate
 
 
 def build_monitor_riser(p):
